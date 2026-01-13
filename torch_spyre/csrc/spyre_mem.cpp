@@ -29,6 +29,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdlib>  // check env vars
 #include <flex/flex_graph_builder.hpp>
 #include <memory>
 #include <sendnn/graph/graph_builder.hpp>
@@ -37,6 +38,7 @@
 #include <sendnn/tensor/sentensor_info.hpp>
 #include <sendnn/util/status.hpp>
 #include <string>
+#include <stdexcept>  // throw exceptions
 #include <utility>
 #include <vector>
 
@@ -246,7 +248,7 @@ auto generate_dci(const at::Tensor* tensor, SpyreTensorLayout stl,
   dci.input_shape_ = host2device ? cpu_shape : stl.device_size;
   dci.output_shape_ = host2device ? stl.device_size : cpu_shape;
   dci.exportJson(s);
-  DEBUGINFO("DataConversionInfo: ", s.str());
+  // DEBUGINFO("DataConversionInfo: ", s.str());  // [AF] to be restored
   return s.str();
 }
 
@@ -413,11 +415,38 @@ auto copy_device_to_host(const at::Tensor& self, const at::Tensor& dst) {
 // allocated memory not the actual pointer
 struct SpyreAllocator final : public at::Allocator {
  private:
-  SpyreAllocator() = default;
+  // SpyreAllocator() = default;
   flex::DeviceMemoryAllocatorPtr getAllocator(unsigned int dev_id) {
     return GlobalRuntime::get()
         ->GetDeviceHandle(dev_id)
         ->GetDeviceMemoryAllocator();
+  }
+
+  bool use_pf = false;
+  std::vector<SegmentInfo> segments;
+  size_t segment_size;
+  size_t min_alloc_bytes = 128;
+  size_t vf_offset = 0;
+
+  SpyreAllocator(size_t seg_sz = size_t{8} * 1024 * 1024 * 1024)
+    : segment_size(seg_sz) {  // constructor
+    // NOTE: alternatively to this detection of VF vs PF, we can check if allocator
+    // attribute vfw_ is nullptr. If so, we are using PF, otherwise VF.
+    // However, this requires allocator object of type flex::DeviceMemoryAllocatorPtr
+    // to exist, which doesn't yet in this constructor. Can be checked within allocate()
+    // method though. However, vfw_ is private and needs a getter created in Flex.
+    const char* fmode_envvar = std::getenv("FLEX_DEVICE");
+    if (fmode_envvar == nullptr)
+      throw std::runtime_error("FLEX_DEVICE env var is not set!");
+
+    std::string fmode = fmode_envvar;
+    if (fmode == "VF") {
+      bool use_pf = false;
+    } else if (fmode == "PF") {
+      bool use_pf = true;
+    } else {
+      throw std::runtime_error("Unsupported FLEX_DEVICE env var value.");
+    }
   }
 
  public:
@@ -432,19 +461,62 @@ struct SpyreAllocator final : public at::Allocator {
             ->getDevice();
 
     auto device_id = curr_device.index();
-    DEBUGINFO("allocating ", nbytes, " (bytes) on Spyre", curr_device);
-    if (nbytes <= 0) {
+    DEBUGINFO("allocating", nbytes, "bytes on Spyre", curr_device);
+    if (nbytes <= 0)
       return {nullptr, nullptr, &ReportAndDelete, curr_device};
-    }
+
     auto allocator = getAllocator(device_id);
     flex::DeviceMemoryAllocationPtr data;  // a smart-pointer object
-    // NOTE: last argument should be set to 0
-    allocator->TryAllocate(&data, nbytes, 0);
-    TORCH_CHECK(data, "Failed to allocate ", nbytes, " bytes on Spyre device.");
-    auto* ctx = new SharedOwnerCtx{std::move(data), device_id};
-    void* ctx_void = static_cast<void*>(ctx);
 
+    // NOTE: vfw_ is private attribute, we need a getter in Flex for this to work
+    // if (
+    //   (allocator->vfw_ == nullptr && !use_pf) || (allocator->vfw_ != nullptr && use_pf)
+    // ){
+    //   throw std::runtime_error(
+    //     "Mismatched detection of PF/VF mode. "
+    //     "Check FLEX_DEVICE env var and vfw_ attribute of allocator."
+    //   );
+    // }
+
+    if (use_pf) {
+      DEBUGINFO("PF allocation");
+      allocator->TryAllocate(&data, nbytes, 0);  // [AV] last argument should be set to 0
+    } else {  // VF mode
+      if (nbytes % 128 != 0)  // unclear if this check ever triggers
+        nbytes = ((nbytes + min_alloc_bytes - 1) / min_alloc_bytes) * min_alloc_bytes;  // round up to next multiple of min_alloc_bytes
+
+      if (segments.empty() || segments.back().free_size < nbytes) {
+        DEBUGINFO("*** VF segment allocation");
+        // reserving memory on Spyre but not moving tensor values into it yet
+        allocator->TryAllocate(&data, segment_size, 0);
+
+        unsigned long alloc_idx = data->AllocIndex();
+        segments.emplace_back(alloc_idx, segment_size);
+
+        vf_offset = 0;  // new block starts at offset 0 (0 is default, can remove this)
+        segments.back().data = data;
+        segments.back().free_size -= nbytes;
+        segments.back().max_offset += nbytes;
+
+      } else {
+        DEBUGINFO(">>> VF block allocation");
+        vf_offset = segments.back().max_offset;
+        segments.back().free_size -= nbytes;
+        segments.back().max_offset += nbytes;
+        data = segments.back().data;
+      }
+
+      if (segments.back().free_size < min_alloc_bytes)
+        DEBUGINFO("VF segment #", segments.size(), "is now full. A new Segment will be allocated next.");
+    }
+
+    TORCH_CHECK(data, "Failed to allocate ", nbytes, " bytes on Spyre device.");
+    auto* ctx = new SharedOwnerCtx{std::move(data), vf_offset, device_id};
+    void* ctx_void = static_cast<void*>(ctx);
     void* data_void = static_cast<void*>(ctx->owner.get());
+
+    if (!use_pf)  // add block info to mapping within last Segment
+      segments.back().blocks[ctx_void] = BlockInfo(vf_offset, vf_offset + nbytes);
 
     auto data_ptr_result =
         at::DataPtr(data_void, ctx_void, &ReportAndDelete, curr_device);
@@ -457,6 +529,39 @@ struct SpyreAllocator final : public at::Allocator {
       return;
     }
     auto* ctx = static_cast<SharedOwnerCtx*>(ctx_void);
+
+      // DEBUG ONLY - TO BE REMOVED
+      DEBUGINFO("Pre deallocation")
+      for (auto& seg : SpyreAllocator::instance().segments) {
+        for (const auto& [soc_ptr, block] : seg.blocks) {
+          DEBUGINFO("  ctx addr", soc_ptr, "-> block bounds:", block.offset_init, block.offset_end)
+        }
+      }
+
+    if (!SpyreAllocator::instance().use_pf) {
+      // we loop on all segments to find the block ptr;
+      // instead, could build a global table of block ptr -> BlockInfo, for faster access
+      for (auto& seg : SpyreAllocator::instance().segments) {
+          auto it = seg.blocks.find(ctx_void);
+          if (it != seg.blocks.end()) {
+              DEBUGINFO("<<< VF block deallocation");
+              size_t nbytes = it->second.offset_end - it->second.offset_init;
+              seg.free_size += nbytes;
+              seg.blocks.erase(it);
+              break;
+          }
+      }
+
+      // DEBUG ONLY - TO BE REMOVED
+      DEBUGINFO("Post deallocation")
+      for (auto& seg : SpyreAllocator::instance().segments) {
+        for (const auto& [soc_ptr, block] : seg.blocks) {
+          DEBUGINFO("  ctx addr", soc_ptr, "-> block bounds:", block.offset_init, block.offset_end)
+        }
+      }
+
+    }
+
     delete ctx;
   }
 
@@ -535,7 +640,7 @@ at::Tensor spyre_empty_strided(c10::IntArrayRef size, c10::IntArrayRef stride,
   caffe2::TypeMeta dtype = c10::scalarTypeToTypeMeta(scalar_type);
   c10::Device device = device_opt.value_or(
       c10::impl::VirtualGuardImpl{c10::DeviceType::PrivateUse1}.getDevice());
-  DEBUGINFO("Size:", size, ", Stride: ", stride, " on device ", device);
+  // DEBUGINFO("Size:", size, ", Stride: ", stride, " on device ", device);
   auto device_layout = SpyreTensorLayout(size.vec(), scalar_type);
   size_t size_bytes = get_device_size_in_bytes(device_layout);
 
@@ -563,7 +668,7 @@ at::Tensor spyre_empty_strided(c10::IntArrayRef size, c10::IntArrayRef stride,
   }
 
   static_cast<SpyreTensorImpl*>(tensorImpl)->spyre_layout = device_layout;
-  DEBUGINFO("SpyreTensorLayout: ", device_layout.toString());
+  // DEBUGINFO("SpyreTensorLayout: ", device_layout.toString());
   return tensor;
 }
 
@@ -616,8 +721,8 @@ at::Tensor& spyre_set_storage(at::Tensor& result, at::Storage storage,
  */
 at::Tensor spyre_copy_from(const at::Tensor& self, const at::Tensor& dst,
                            bool non_blocking) {
-  DEBUGINFO("self (", self.scalar_type(), ") is on:", self.device());
-  DEBUGINFO("dst (", dst.scalar_type(), ") on:", dst.device());
+  // DEBUGINFO("self (", self.scalar_type(), ") is on:", self.device());
+  // DEBUGINFO("dst (", dst.scalar_type(), ") on:", dst.device());
   at::Storage source_storage;
   at::Storage dest_storage;
 
