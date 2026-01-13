@@ -26,7 +26,30 @@ namespace spyre {
 
 struct SharedOwnerCtx {
   flex::DeviceMemoryAllocationPtr owner;
+  size_t vf_offset = 0;  // VF only. Allocation offset within a Segment. Segment id is alloc_index within `owner`
   signed char device_id;
+};
+
+struct BlockInfo {
+  size_t offset_init;
+  size_t offset_end;
+
+  BlockInfo() : offset_init(0), offset_end(0) {}
+  BlockInfo(size_t x, size_t y)
+    : offset_init(x), offset_end(y) {}
+};
+
+struct SegmentInfo {
+  unsigned long segment_id;  // this is alloc_idx (VF only) which is type AIUMsg::V1::AllocationIndex = senlib::v2::LittleEndian<unsigned long> = unsigned long?
+  flex::DeviceMemoryAllocationPtr data;
+
+  size_t total_size;
+  size_t free_size;
+  size_t max_offset = 0;
+  std::unordered_map<void*, BlockInfo> blocks;  // mapping ShareOwnerCtx ptr -> BlockInfo
+
+  SegmentInfo(unsigned long idx, size_t sz)
+    : segment_id(idx), total_size(sz), free_size(sz) {}
 };
 
 class GlobalRuntime {
