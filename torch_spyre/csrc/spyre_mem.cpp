@@ -417,7 +417,6 @@ auto copy_device_to_host(const at::Tensor& self, const at::Tensor& dst) {
 // allocated memory not the actual pointer
 struct SpyreAllocator final : public at::Allocator {
  private:
-  // SpyreAllocator() = default;
   flex::DeviceMemoryAllocatorPtr getAllocator(unsigned int dev_id) {
     return GlobalRuntime::get()
         ->GetDeviceHandle(dev_id)
@@ -484,32 +483,64 @@ struct SpyreAllocator final : public at::Allocator {
       DEBUGINFO("PF allocation");
       allocator->TryAllocate(&data, nbytes, 0);  // [AV] last argument should be set to 0
     } else {  // VF mode
-      if (nbytes % 128 != 0)  // unclear if this check ever triggers
-        nbytes = ((nbytes + min_alloc_bytes - 1) / min_alloc_bytes) * min_alloc_bytes;  // round up to next multiple of min_alloc_bytes
+      // Segments are allocated sequentially and never deallocated (for now).
+      // Block are allocated within first (lowest offset) available free space and
+      // can be deallocated, so that the memory can be reutilized.
 
-      if (segments.empty() || segments.back().free_size < nbytes) {
-        DEBUGINFO("*** VF segment allocation");
-        // reserving memory on Spyre but not moving tensor values into it yet
-        allocator->TryAllocate(&data, segment_size, 0);
-
-        unsigned long alloc_idx = data->AllocIndex();
-        segments.emplace_back(alloc_idx, segment_size);
-
-        vf_offset = 0;  // new block starts at offset 0 (0 is default, can remove this)
-        segments.back().data = data;
-        segments.back().free_size -= nbytes;
-        segments.back().max_offset += nbytes;
-
-      } else {
-        DEBUGINFO(">>> VF block allocation");
-        vf_offset = segments.back().max_offset;
-        segments.back().free_size -= nbytes;
-        segments.back().max_offset += nbytes;
-        data = segments.back().data;
+      if (nbytes % min_alloc_bytes != 0) {  // unclear if this check ever triggers
+        // "padding": round up to next multiple of min_alloc_bytes
+        nbytes = ((nbytes + min_alloc_bytes - 1) / min_alloc_bytes) * min_alloc_bytes;
       }
 
-      if (segments.back().free_size < min_alloc_bytes)
-        DEBUGINFO("VF segment #", segments.size(), "is now full. A new Segment will be allocated next.");
+      SegmentInfo* found_seg = nullptr;
+      Interval found_range;
+
+      for (SegmentInfo& seg : segments) {
+        for (const Interval& r : seg.free_ranges) {
+          if (r.end - r.start >= nbytes) {
+            found_seg = &seg;  // stop at first compatible interval
+            found_range = r;
+            break;
+          }
+        }
+        if (found_seg) break;
+      }
+
+      if (found_seg) {
+        DEBUGINFO(">>> VF block allocation");
+        vf_offset = found_range.start;
+        found_seg->free_ranges.erase(found_range);  // remove old Interval
+
+        if (found_range.end - found_range.start > nbytes) {  // some space remained
+          Interval new_range{found_range.start + nbytes, found_range.end};
+          found_seg->free_ranges.insert(new_range);
+        }
+        found_seg->free_size -= nbytes;
+        data = found_seg->data;  // DeviceMemoryAllocationPtr associated with this Segment
+        DEBUGINFO("    seg id", found_seg->segment_id, "offset", vf_offset, "bytes", nbytes, "free mem", found_seg->free_size);
+        for (const Interval& r : found_seg->free_ranges)
+          DEBUGINFO("    seg id", found_seg->segment_id, "| free", r.start, "to", r.end);
+      } else {  // add new Segment before creating a Block in it
+        DEBUGINFO("*** VF segment allocation");
+
+        if (nbytes > segment_size)
+          throw std::runtime_error("Requested memory allocation exceeds Segment limit.");
+
+        // reserving memory on Spyre but not moving tensor values into it yet
+        allocator->TryAllocate(&data, segment_size, 0);
+        unsigned long alloc_idx = data->AllocIndex();
+
+        segments.emplace_back(alloc_idx, segment_size);
+        SegmentInfo& seg = segments.back();
+        seg.data = data;
+
+        // Insert block
+        vf_offset = 0;
+        seg.free_size -= nbytes;
+        seg.free_ranges.insert(Interval{nbytes, segment_size});
+        for (const Interval& r : seg.free_ranges)
+          DEBUGINFO("    seg id", seg.segment_id, "| free", r.start, "to", r.end);
+      }
     }
 
     TORCH_CHECK(data, "Failed to allocate ", nbytes, " bytes on Spyre device.");
@@ -532,21 +563,43 @@ struct SpyreAllocator final : public at::Allocator {
     }
     auto* ctx = static_cast<SharedOwnerCtx*>(ctx_void);
 
+    if (!SpyreAllocator::instance().use_pf) {
+
       // DEBUG ONLY - TO BE REMOVED
       DEBUGINFO("Pre deallocation")
-      for (auto& seg : SpyreAllocator::instance().segments) {
-        for (const auto& [soc_ptr, block] : seg.blocks) {
-          DEBUGINFO("  ctx addr", soc_ptr, "-> block bounds:", block.offset_init, block.offset_end)
-        }
+      for (SegmentInfo& seg : SpyreAllocator::instance().segments) {
+        for (const auto& [soc_ptr, block] : seg.blocks)
+          DEBUGINFO("    ctx addr", soc_ptr, "-> block bounds:", block.offset_init, block.offset_end);
+        for (const Interval& r : seg.free_ranges)
+          DEBUGINFO("    seg id", seg.segment_id, "| free", r.start, "to", r.end);
       }
+      // =====================
 
-    if (!SpyreAllocator::instance().use_pf) {
-      // we loop on all segments to find the block ptr;
-      // instead, could build a global table of block ptr -> BlockInfo, for faster access
-      for (auto& seg : SpyreAllocator::instance().segments) {
+      for (SegmentInfo& seg : SpyreAllocator::instance().segments) {
           auto it = seg.blocks.find(ctx_void);
           if (it != seg.blocks.end()) {
               DEBUGINFO("<<< VF block deallocation");
+              Interval new_range{it->second.offset_init, it->second.offset_end};  // new free interval
+
+              auto& fr = seg.free_ranges;
+              auto itr = fr.lower_bound(new_range);  // find first interval with start >= new_range.start
+
+              // merge with previous interval if touching at new_range.start
+              if (itr != fr.begin()) {  // if not the first interval
+                auto prev = std::prev(itr);
+                if (prev->end == new_range.start) {
+                    new_range.start = prev->start;
+                    new_range.end = std::max(prev->end, new_range.end);
+                    fr.erase(prev);
+                }
+              }
+              // merge with next interval if touching at new_range.end
+              while (itr != fr.end() && itr->start == new_range.end) {
+                new_range.end = std::max(itr->end, new_range.end);
+                itr = fr.erase(itr);
+              }
+              fr.insert(new_range);
+
               size_t nbytes = it->second.offset_end - it->second.offset_init;
               seg.free_size += nbytes;
               seg.blocks.erase(it);
@@ -556,12 +609,13 @@ struct SpyreAllocator final : public at::Allocator {
 
       // DEBUG ONLY - TO BE REMOVED
       DEBUGINFO("Post deallocation")
-      for (auto& seg : SpyreAllocator::instance().segments) {
-        for (const auto& [soc_ptr, block] : seg.blocks) {
-          DEBUGINFO("  ctx addr", soc_ptr, "-> block bounds:", block.offset_init, block.offset_end)
-        }
+      for (SegmentInfo& seg : SpyreAllocator::instance().segments) {
+        for (const auto& [soc_ptr, block] : seg.blocks)
+          DEBUGINFO("    ctx addr", soc_ptr, "-> block bounds:", block.offset_init, block.offset_end);
+        for (const Interval& r : seg.free_ranges)
+          DEBUGINFO("    seg id", seg.segment_id, "| free", r.start, "to", r.end);
       }
-
+      // =====================
     }
 
     delete ctx;
@@ -671,7 +725,7 @@ at::Tensor spyre_empty_strided(c10::IntArrayRef size, c10::IntArrayRef stride,
   }
 
   static_cast<SpyreTensorImpl*>(tensorImpl)->spyre_layout = device_layout;
-  // DEBUGINFO("SpyreTensorLayout: ", device_layout.toString());
+  // DEBUGINFO("SpyreTensorLayout: ", device_layout.toString());  // [AF] to be restored
   return tensor;
 }
 at::Tensor spyre_empty_with_layout(c10::IntArrayRef size,
@@ -723,8 +777,8 @@ at::Tensor& spyre_set_storage(at::Tensor& result, at::Storage storage,
  */
 at::Tensor spyre_copy_from(const at::Tensor& self, const at::Tensor& dst,
                            bool non_blocking) {
-  // DEBUGINFO("self (", self.scalar_type(), ") is on:", self.device());
-  // DEBUGINFO("dst (", dst.scalar_type(), ") on:", dst.device());
+  // DEBUGINFO("self (", self.scalar_type(), ") is on:", self.device());  // [AF] to be restored
+  // DEBUGINFO("dst (", dst.scalar_type(), ") on:", dst.device());  // [AF] to be restored
   at::Storage source_storage;
   at::Storage dest_storage;
 
