@@ -26,7 +26,7 @@ namespace spyre {
 
 struct SharedOwnerCtx {
   flex::DeviceMemoryAllocationPtr owner;
-  size_t vf_offset = 0;  // VF only. Allocation offset within a Segment. Segment id is alloc_index within `owner`
+  size_t vf_offset = 0;  // VF only. Allocation offset of reserved Block within a Segment.
   signed char device_id;
 };
 
@@ -39,14 +39,24 @@ struct BlockInfo {
     : offset_init(x), offset_end(y) {}
 };
 
+struct Interval {
+  size_t start;
+  size_t end;   // one past last byte
+
+  bool operator<(const Interval& other) const {
+    return start < other.start;   // for std::set ordering
+  }
+};
+
 struct SegmentInfo {
-  unsigned long segment_id;  // this is alloc_idx (VF only) which is type AIUMsg::V1::AllocationIndex = senlib::v2::LittleEndian<unsigned long> = unsigned long?
-  flex::DeviceMemoryAllocationPtr data;
+  unsigned long segment_id;  // VF only. Same as alloc_idx. Type: AIUMsg::V1::AllocationIndex = senlib::v2::LittleEndian<unsigned long>
+  flex::DeviceMemoryAllocationPtr data;  // needed for deallocation? CHECK
 
   size_t total_size;
   size_t free_size;
-  size_t max_offset = 0;
-  std::unordered_map<void*, BlockInfo> blocks;  // mapping ShareOwnerCtx ptr -> BlockInfo
+
+  std::unordered_map<void*, BlockInfo> blocks;  // map ShareOwnerCtx ptr -> BlockInfo
+  std::set<Interval> free_ranges;  // track available memory
 
   SegmentInfo(unsigned long idx, size_t sz)
     : segment_id(idx), total_size(sz), free_size(sz) {}
