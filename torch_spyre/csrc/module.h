@@ -39,11 +39,11 @@ struct BlockInfo {
     : offset_init(x), offset_end(y) {}
 };
 
-struct Interval {
+struct FreeInterval {
   size_t start;
-  size_t end;   // one past last byte
+  size_t end;  // one past last byte
 
-  bool operator<(const Interval& other) const {
+  bool operator<(const FreeInterval& other) const {
     return start < other.start;   // for std::set ordering
   }
 };
@@ -56,7 +56,8 @@ struct SegmentInfo {
   size_t free_size;
 
   std::unordered_map<void*, BlockInfo> blocks;  // map ShareOwnerCtx ptr -> BlockInfo
-  std::set<Interval> free_ranges;  // track available memory
+  std::set<FreeInterval> free_intervals;  // track available memory
+  std::multiset<size_t> free_interval_sizes;  // track sizes of all free intervals
 
   SegmentInfo(unsigned long idx, size_t sz)
     : segment_id(idx), total_size(sz), free_size(sz) {}

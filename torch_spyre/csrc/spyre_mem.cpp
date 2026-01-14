@@ -491,10 +491,12 @@ struct SpyreAllocator final : public at::Allocator {
       }
 
       SegmentInfo* found_seg = nullptr;
-      Interval found_range;
+      FreeInterval found_range;
 
       for (SegmentInfo& seg : segments) {
-        for (const Interval& r : seg.free_ranges) {
+        if (seg.free_interval_sizes.empty() || *seg.free_interval_sizes.rbegin() < nbytes)
+          continue;
+        for (const FreeInterval& r : seg.free_intervals) {
           if (r.end - r.start >= nbytes) {
             found_seg = &seg;  // stop at first compatible interval
             found_range = r;
@@ -507,17 +509,25 @@ struct SpyreAllocator final : public at::Allocator {
       if (found_seg) {
         DEBUGINFO(">>> VF block allocation");
         vf_offset = found_range.start;
-        found_seg->free_ranges.erase(found_range);  // remove old Interval
+        found_seg->free_intervals.erase(found_range);  // remove old FreeInterval
+        found_seg->free_interval_sizes.erase(found_range.end - found_range.start);
 
         if (found_range.end - found_range.start > nbytes) {  // some space remained
-          Interval new_range{found_range.start + nbytes, found_range.end};
-          found_seg->free_ranges.insert(new_range);
+          FreeInterval new_range{found_range.start + nbytes, found_range.end};
+          found_seg->free_intervals.insert(new_range);
+          found_seg->free_interval_sizes.insert(found_range.end - found_range.start - nbytes);
         }
         found_seg->free_size -= nbytes;
         data = found_seg->data;  // DeviceMemoryAllocationPtr associated with this Segment
+
+        // [AF] DEBUG ONLY - TO BE REMOVED
         DEBUGINFO("    seg id", found_seg->segment_id, "offset", vf_offset, "bytes", nbytes, "free mem", found_seg->free_size);
-        for (const Interval& r : found_seg->free_ranges)
-          DEBUGINFO("    seg id", found_seg->segment_id, "| free", r.start, "to", r.end);
+        for (const size_t& sz : found_seg->free_interval_sizes)
+          DEBUGINFO("    seg id", found_seg->segment_id, "| free sz", sz);
+        for (const FreeInterval& r : found_seg->free_intervals)
+          DEBUGINFO("    seg id", found_seg->segment_id, "| free idx", r.start, "to", r.end);
+        // ===============================
+
       } else {  // add new Segment before creating a Block in it
         DEBUGINFO("*** VF segment allocation");
 
@@ -535,9 +545,15 @@ struct SpyreAllocator final : public at::Allocator {
         // Insert block
         vf_offset = 0;
         seg.free_size -= nbytes;
-        seg.free_ranges.insert(Interval{nbytes, segment_size});
-        for (const Interval& r : seg.free_ranges)
-          DEBUGINFO("    seg id", seg.segment_id, "| free", r.start, "to", r.end);
+        seg.free_interval_sizes.insert(seg.free_size);
+        seg.free_intervals.insert(FreeInterval{nbytes, segment_size});
+
+        // [AF] DEBUG ONLY - TO BE REMOVED
+        for (const size_t& sz : seg.free_interval_sizes)
+          DEBUGINFO("    seg id", seg.segment_id, "| free sz", sz);
+        for (const FreeInterval& r : seg.free_intervals)
+          DEBUGINFO("    seg id", seg.segment_id, "| free idx", r.start, "to", r.end);
+        // ===============================
       }
     }
 
@@ -563,57 +579,63 @@ struct SpyreAllocator final : public at::Allocator {
 
     if (!SpyreAllocator::instance().use_pf) {
 
-      // DEBUG ONLY - TO BE REMOVED
+      // [AF] DEBUG ONLY - TO BE REMOVED
       DEBUGINFO("Pre deallocation")
       for (SegmentInfo& seg : SpyreAllocator::instance().segments) {
         for (const auto& [soc_ptr, block] : seg.blocks)
           DEBUGINFO("    ctx addr", soc_ptr, "-> block bounds:", block.offset_init, block.offset_end);
-        for (const Interval& r : seg.free_ranges)
-          DEBUGINFO("    seg id", seg.segment_id, "| free", r.start, "to", r.end);
+        for (const size_t& sz : seg.free_interval_sizes)
+          DEBUGINFO("    seg id", seg.segment_id, "| free sz", sz);
+        for (const FreeInterval& r : seg.free_intervals)
+          DEBUGINFO("    seg id", seg.segment_id, "| free idx", r.start, "to", r.end);
       }
-      // =====================
+      // ===============================
 
       for (SegmentInfo& seg : SpyreAllocator::instance().segments) {
           auto it = seg.blocks.find(ctx_void);
           if (it != seg.blocks.end()) {
               DEBUGINFO("<<< VF block deallocation");
-              Interval new_range{it->second.offset_init, it->second.offset_end};  // new free interval
+              FreeInterval new_range{it->second.offset_init, it->second.offset_end};  // new free interval
 
-              auto& fr = seg.free_ranges;
-              auto itr = fr.lower_bound(new_range);  // find first interval with start >= new_range.start
+              auto& fr = seg.free_intervals;
+              auto fr_low = fr.lower_bound(new_range);  // find first interval with start >= new_range.start
 
               // merge with previous interval if touching at new_range.start
-              if (itr != fr.begin()) {  // if not the first interval
-                auto prev = std::prev(itr);
+              if (fr_low != fr.begin()) {  // if not the first interval
+                auto prev = std::prev(fr_low);
                 if (prev->end == new_range.start) {
                     new_range.start = prev->start;
                     new_range.end = std::max(prev->end, new_range.end);
+                    seg.free_interval_sizes.erase(prev->end - prev->start);
                     fr.erase(prev);
                 }
               }
               // merge with next interval if touching at new_range.end
-              while (itr != fr.end() && itr->start == new_range.end) {
-                new_range.end = std::max(itr->end, new_range.end);
-                itr = fr.erase(itr);
+              if (fr_low != fr.end() && fr_low->start == new_range.end) {
+                new_range.end = std::max(fr_low->end, new_range.end);
+                seg.free_interval_sizes.erase(fr_low->end - fr_low->start);
+                fr.erase(fr_low);
               }
               fr.insert(new_range);
+              seg.free_interval_sizes.insert(new_range.end - new_range.start);
 
-              size_t nbytes = it->second.offset_end - it->second.offset_init;
-              seg.free_size += nbytes;
+              seg.free_size += it->second.offset_end - it->second.offset_init;
               seg.blocks.erase(it);
               break;
           }
       }
 
-      // DEBUG ONLY - TO BE REMOVED
+      // [AF] DEBUG ONLY - TO BE REMOVED
       DEBUGINFO("Post deallocation")
       for (SegmentInfo& seg : SpyreAllocator::instance().segments) {
         for (const auto& [soc_ptr, block] : seg.blocks)
           DEBUGINFO("    ctx addr", soc_ptr, "-> block bounds:", block.offset_init, block.offset_end);
-        for (const Interval& r : seg.free_ranges)
+        for (const size_t& sz : seg.free_interval_sizes)
+          DEBUGINFO("    seg id", seg.segment_id, "| free sz", sz);
+        for (const FreeInterval& r : seg.free_intervals)
           DEBUGINFO("    seg id", seg.segment_id, "| free", r.start, "to", r.end);
       }
-      // =====================
+      // ===============================
     }
 
     delete ctx;
