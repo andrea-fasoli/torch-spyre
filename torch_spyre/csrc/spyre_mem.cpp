@@ -430,12 +430,15 @@ struct SpyreAllocator final : public at::Allocator {
   size_t vf_offset = 0;
 
   SpyreAllocator(size_t seg_sz = size_t{8} * 1024 * 1024 * 1024)
-    : segment_size(seg_sz) {  // constructor
-    // NOTE: alternatively to this detection of VF vs PF, we can check if allocator
-    // attribute vfw_ is nullptr. If so, we are using PF, otherwise VF.
-    // However, this requires allocator object of type flex::DeviceMemoryAllocatorPtr
-    // to exist, which doesn't yet in this constructor. Can be checked within allocate()
-    // method though. However, vfw_ is private and needs a getter created in Flex.
+    : segment_size(seg_sz) {
+    /* This constructor determines if using V of PF mode based on FLEX_DEVICE env var.
+    Alternatively to the following method, we could check if allocator
+    attribute vfw_ is nullptr. If so, PF is in use, otherwise VF.
+    However, this requires allocator object of type flex::DeviceMemoryAllocatorPtr
+    to exist, which doesn't yet in this constructor. Can be checked within allocate()
+    method though. However, vfw_ is private and needs a getter created in Flex.
+    */
+
     const char* fmode_envvar = std::getenv("FLEX_DEVICE");
     if (fmode_envvar == nullptr)
       throw std::runtime_error("FLEX_DEVICE env var is not set!");
@@ -511,16 +514,16 @@ struct SpyreAllocator final : public at::Allocator {
       if (found_seg) {
         DEBUGINFO(">>> VF block allocation");
         vf_offset = found_range.start;
-        found_seg->free_intervals.erase(found_range);  // remove old FreeInterval
+        found_seg->free_intervals.erase(found_range);  // remove FreeInterval selected to contain the new Block
         found_seg->free_interval_sizes.erase(found_range.end - found_range.start);
 
-        if (found_range.end - found_range.start > nbytes) {  // some space remained
+        if (found_range.end - found_range.start > nbytes) {  // some space remains after Block is created
           FreeInterval new_range{found_range.start + nbytes, found_range.end};
           found_seg->free_intervals.insert(new_range);
           found_seg->free_interval_sizes.insert(found_range.end - found_range.start - nbytes);
         }
         found_seg->free_size -= nbytes;
-        data = found_seg->data;  // DeviceMemoryAllocationPtr associated with this Segment
+        data = found_seg->data;  // DeviceMemoryAllocationPtr shared within Segment
 
         // [AF] DEBUG ONLY - TO BE REMOVED
         DEBUGINFO("    seg id", found_seg->segment_id, "offset", vf_offset, "bytes", nbytes, "free mem", found_seg->free_size);

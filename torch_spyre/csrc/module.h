@@ -26,11 +26,13 @@ namespace spyre {
 
 struct SharedOwnerCtx {
   flex::DeviceMemoryAllocationPtr owner;
-  size_t vf_offset = 0;  // VF only. Allocation offset of reserved Block within a Segment.
+  size_t vf_offset = 0;  // allocation offset of reserved memory Block. VF only.
   signed char device_id;
 };
 
 struct BlockInfo {
+  // Contiguous interval of reserved memory within a Segment. VF only.
+
   size_t offset_init;
   size_t offset_end;
 
@@ -40,6 +42,8 @@ struct BlockInfo {
 };
 
 struct FreeInterval {
+  // Contiguous interval of free memory within a Segment. VF only.
+
   size_t start;
   size_t end;  // one past last byte
 
@@ -49,8 +53,11 @@ struct FreeInterval {
 };
 
 struct SegmentInfo {
-  unsigned long segment_id;  // VF only. Same as alloc_idx. Type: AIUMsg::V1::AllocationIndex = senlib::v2::LittleEndian<unsigned long>
-  flex::DeviceMemoryAllocationPtr data;  // needed for deallocation? CHECK
+  // One contiguous allocation on Spyre, via TryAllocate. VF only.
+  // Allocated memory is subdivided into Blocks and FreeIntervals.
+
+  unsigned long segment_id;  // same as alloc_idx. Type: AIUMsg::V1::AllocationIndex = senlib::v2::LittleEndian<unsigned long>
+  flex::DeviceMemoryAllocationPtr data;  // in common across all ShareOwnerCtx associated with the same Segment
 
   size_t total_size;
   size_t free_size;
