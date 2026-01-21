@@ -431,7 +431,7 @@ struct SpyreAllocator final : public at::Allocator {
 
   SpyreAllocator(size_t seg_sz = size_t{8} * 1024 * 1024 * 1024)
     : segment_size(seg_sz) {
-    /* This constructor determines if using V of PF mode based on FLEX_DEVICE env var.
+    /* This constructor determines if using VF of PF mode based on FLEX_DEVICE env var.
     Alternatively to the following method, we could check if allocator
     attribute vfw_ is nullptr. If so, PF is in use, otherwise VF.
     However, this requires allocator object of type flex::DeviceMemoryAllocatorPtr
@@ -445,9 +445,9 @@ struct SpyreAllocator final : public at::Allocator {
 
     std::string fmode = fmode_envvar;
     if (fmode == "VF") {
-      bool use_pf = false;
+        use_pf = false;
     } else if (fmode == "PF") {
-      bool use_pf = true;
+        use_pf = true;
     } else {
       throw std::runtime_error("Unsupported FLEX_DEVICE env var value.");
     }
