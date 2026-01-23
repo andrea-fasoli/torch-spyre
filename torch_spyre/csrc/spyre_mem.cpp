@@ -33,7 +33,7 @@
 #include <flex/flex_graph_builder.hpp>
 #include <memory>
 #include <sendnn/graph/graph_builder.hpp>
-#include <sendnn/runtime/graph_loader.hpp>
+#include <sendnn/interface/graph_loader.hpp>
 #include <sendnn/runtime/runtime_interface.hpp>
 #include <sendnn/tensor/sentensor_info.hpp>
 #include <sendnn/util/status.hpp>
@@ -285,7 +285,9 @@ auto create_dma_graph(const at::Tensor& self, const at::Tensor& dst,
                             sendnn::TensorLocation::HOST());
   //  STAGE 1: execution graph
   sendnn::SubGraph sub_graph;
-  int64_t xfer_size = dev_tensor_shape.Volume() * cpu_tensor->element_size();
+  const auto [elem_bytes_cpu, elem_bytes_spyre] =
+      spyre::elementSize(cpu_tensor->scalar_type());
+  int64_t xfer_size = dev_tensor_shape.Volume() * elem_bytes_spyre;
   {
     flex::FlexGraphBuilder gb;
     DMAParameters dma_param{xfer_size, 0, 0};
@@ -869,6 +871,19 @@ at::Tensor spyre_copy_from(const at::Tensor& self, const at::Tensor& dst,
     // For all other cases fallback to the upstream implementation
     return at::_copy_from(self, dst, non_blocking);
   }
+}
+at::Tensor to_with_layout(const at::Tensor& self,
+                          SpyreTensorLayout device_layout) {
+  DEBUGINFO(
+      "Tensor info on CPU (Size:", self.sizes(), ", Stride: ", self.strides(),
+      ", dtype: ", c10::typeMetaToScalarType(self.dtype()),
+      ") and to be mapped onto device ",
+      c10::impl::VirtualGuardImpl{c10::DeviceType::PrivateUse1}.getDevice(),
+      " with layout ", device_layout.toString());
+  auto dst = spyre_empty_with_layout(self.sizes(), self.strides(),
+                                     c10::typeMetaToScalarType(self.dtype()),
+                                     device_layout);
+  return spyre_copy_from(self, dst, false);
 }
 
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
