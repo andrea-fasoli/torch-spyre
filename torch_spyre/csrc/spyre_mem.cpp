@@ -612,6 +612,125 @@ struct SpyreAllocator final : public at::Allocator {
     seg->free_size -= nbytes;
   }
 
+  SegmentInfo& createNewSegment(size_t nbytes,
+                                flex::DeviceMemoryAllocatorPtr allocator,
+                                size_t& vf_offset) {
+  /* Allocate new Segment and create a first Block at offset 0 in it.*/
+
+    if (nbytes > segment_size)
+      throw std::runtime_error("Requested memory exceeds Segment limit.");
+
+    flex::DeviceMemoryAllocationPtr data;
+    allocator->TryAllocate(&data, segment_size, 0);  // reserve memory on Spyre but not moving tensor values into it yet
+    unsigned long alloc_idx = data->AllocIndex();
+
+    segments.emplace_back(alloc_idx, segment_size);
+    SegmentInfo& seg = segments.back();
+    seg.data = data;
+
+    // Insert first block
+    vf_offset = 0;
+    seg.free_size -= nbytes;
+    seg.free_interval_sizes.insert(seg.free_size);
+    seg.free_intervals.insert(FreeInterval{nbytes, segment_size});
+
+    return seg;
+  }
+
+  // [AF] DEBUG ONLY - to be removed or made less verbose
+  void logSegmentState(const SegmentInfo& seg, const char* context,
+                       bool include_blocks = false) {
+  /* Log free and used memory in the specified Segment. */
+
+    DEBUGINFO(context, "seg id", seg.segment_id, "free mem", seg.free_size);
+    if (include_blocks) {
+      for (const auto& [soc_ptr, block] : seg.blocks)
+        DEBUGINFO("    ctx addr", soc_ptr, "-> block bounds:", block.offset_init, block.offset_end);
+    }
+    for (const size_t& sz : seg.free_interval_sizes)
+      DEBUGINFO("  free sz", sz);
+    for (const FreeInterval& r : seg.free_intervals)
+      DEBUGINFO("  free idx", r.start, "to", r.end);
+  }
+
+  // [AF] DEBUG ONLY - to be removed or made less verbose
+  void logAllSegments(const char* context, bool include_blocks = false) {
+  /* Log free and used memory of all Segments. */
+
+    DEBUGINFO(context);
+    for (const SegmentInfo& seg : segments) {
+      logSegmentState(seg, "", include_blocks);
+    }
+  }
+
+ public:
+  static SpyreAllocator& instance() {
+    static SpyreAllocator allocator;
+    return allocator;
+  }
+
+  at::DataPtr allocate(size_t nbytes) override {
+    c10::Device curr_device =
+      c10::impl::getDeviceGuardImpl(c10::DeviceType::PrivateUse1)->getDevice();
+    auto device_id = curr_device.index();
+    DEBUGINFO("allocating", nbytes, "bytes on Spyre", curr_device);
+    if (nbytes <= 0)
+      return {nullptr, nullptr, &ReportAndDelete, curr_device};
+
+    auto allocator = getAllocator(device_id);
+    flex::DeviceMemoryAllocationPtr data;  // a smart-pointer object
+    AllocationResult alloc_result{nullptr, {}, false};  // VF Mode allocation result
+
+    // NOTE: vfw_ is private attribute, we need a getter in Flex for this to work
+    // if (
+    //   (allocator->vfw_ == nullptr && !use_pf) || (allocator->vfw_ != nullptr && use_pf)
+    // ){
+    //   throw std::runtime_error(
+    //     "Mismatched detection of PF/VF mode. "
+    //     "Check FLEX_DEVICE env var and vfw_ attribute of allocator."
+    //   );
+    // }
+
+    if (use_pf) {
+      DEBUGINFO("PF allocation");
+      allocator->TryAllocate(&data, nbytes, 0);  // [AV] last argument should be set to 0
+    } else {  // VF mode
+      /* Segments are allocated sequentially and never deallocated (for now).
+      Block are allocated within first (lowest offset) available free space and can be
+      deallocated, so that the memory can be reutilized.
+      This behavior may change in the future.
+      */
+
+      nbytes = setMinSpyreAllocation(nbytes);
+      alloc_result = findFreeBlock(nbytes);
+
+      if (alloc_result.found) {
+        DEBUGINFO(">>> VF block allocation");
+        allocateInSegment(alloc_result.segment, alloc_result.interval, nbytes, vf_offset);
+        data = alloc_result.segment->data;  // DeviceMemoryAllocationPtr shared within Segment
+        logSegmentState(*alloc_result.segment, "After block allocation");  // [AF] very verbose
+      } else {
+        DEBUGINFO("*** VF segment allocation");
+        SegmentInfo& seg = createNewSegment(nbytes, allocator, vf_offset);
+        data = seg.data;  // DeviceMemoryAllocationPtr shared within Segment
+        logSegmentState(seg, "After segment creation");  // [AF] very verbose
+      }
+    }
+    TORCH_CHECK(data, "Failed to allocate ", nbytes, " bytes on Spyre device.");
+
+    // Instantiate object to live beyond SpyreAllocator scope
+    auto* ctx = new SharedOwnerCtx{std::move(data), vf_offset, device_id};
+    void* ctx_void = static_cast<void*>(ctx);
+    void* data_void = static_cast<void*>(ctx->owner.get());
+
+    if (!use_pf && alloc_result.found) { // add block info to mapping within last Segment
+      alloc_result.segment->blocks[ctx_void] = BlockInfo(vf_offset, vf_offset + nbytes);
+      block_to_segment[ctx_void] = alloc_result.segment;
+    }
+
+    return at::DataPtr(data_void, ctx_void, &ReportAndDelete, curr_device);
+  }
+
   void deallocateBlock(SegmentInfo& seg, void* ctx_void) {
   /* Deallocate a block from a segment and return its memory to the free pool.
    * Merges adjacent free intervals to reduce fragmentation. Updates segment's
