@@ -568,6 +568,7 @@ struct SpyreAllocator final : public at::Allocator {
 
     auto allocator = getAllocator(device_id);
     flex::DeviceMemoryAllocationPtr data;  // a smart-pointer object
+    AllocationResult alloc_result{nullptr, {}, false};  // VF Mode allocation result
 
     // NOTE: vfw_ is private attribute, we need a getter in Flex for this to work
     // if (
@@ -590,13 +591,13 @@ struct SpyreAllocator final : public at::Allocator {
       */
 
       nbytes = setMinSpyreAllocation(nbytes);
-      auto [found_seg, found_range, found] = findFreeBlock(nbytes);
+      alloc_result = findFreeBlock(nbytes);
 
-      if (found) {
+      if (alloc_result.found) {
         DEBUGINFO(">>> VF block allocation");
-        allocateInSegment(found_seg, found_range, nbytes, vf_offset);
-        data = found_seg->data;  // DeviceMemoryAllocationPtr shared within Segment
-        logSegmentState(*found_seg, "After block allocation");  // [AF] very verbose
+        allocateInSegment(alloc_result.segment, alloc_result.interval, nbytes, vf_offset);
+        data = alloc_result.segment->data;  // DeviceMemoryAllocationPtr shared within Segment
+        logSegmentState(*alloc_result.segment, "After block allocation");  // [AF] very verbose
       } else {
         DEBUGINFO("*** VF segment allocation");
         SegmentInfo& seg = createNewSegment(nbytes, allocator, vf_offset);
@@ -611,9 +612,10 @@ struct SpyreAllocator final : public at::Allocator {
     void* ctx_void = static_cast<void*>(ctx);
     void* data_void = static_cast<void*>(ctx->owner.get());
 
-    if (!use_pf)  // add block info to mapping within last Segment
-      segments.back().blocks[ctx_void] = BlockInfo(vf_offset, vf_offset + nbytes);
-      block_to_segment[ctx_void] = &segments.back();
+    if (!use_pf && alloc_result.found) { // add block info to mapping within last Segment
+      alloc_result.segment->blocks[ctx_void] = BlockInfo(vf_offset, vf_offset + nbytes);
+      block_to_segment[ctx_void] = alloc_result.segment;
+    }
 
     return at::DataPtr(data_void, ctx_void, &ReportAndDelete, curr_device);
   }
