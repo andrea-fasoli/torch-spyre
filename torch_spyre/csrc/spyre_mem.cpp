@@ -433,7 +433,7 @@ struct SpyreAllocator final : public at::Allocator {
   std::unordered_map<void*, SegmentInfo*> block_to_segment;
 
   SpyreAllocator(
-    size_t seg_sz = size_t{16} * 1024 * 1024 * 1024,   // 16 GB Segment size
+    size_t seg_sz = size_t{12} * 1024 * 1024 * 1024,   // 12 GB Segment size
     int n_seg = 8)
     : segment_size(seg_sz), n_segments(n_seg) {
     /* This constructor determines if using VF of PF mode based on FLEX_DEVICE env var.
@@ -499,15 +499,30 @@ struct SpyreAllocator final : public at::Allocator {
         "exceeds segment size (" + std::to_string(segment_size) + " bytes)");
     }
 
+    SegmentInfo* best_seg = nullptr;
+    size_t max_free_size = 0;
+
     for (SegmentInfo& seg : segments) {
-      if (seg.free_interval_sizes.empty() || *seg.free_interval_sizes.rbegin() < nbytes)
+      if (seg.free_size < nbytes ||
+          seg.free_interval_sizes.empty() ||
+          *seg.free_interval_sizes.rbegin() < nbytes)
         continue;
 
-      for (const FreeInterval& r : seg.free_intervals) {
-        if (r.end - r.start >= nbytes)
-          return {&seg, r, true};  // free Block found
+      // Track segment with most free memory
+      if (seg.free_size > max_free_size) {
+        max_free_size = seg.free_size;
+        best_seg = &seg;
       }
     }
+
+    if (best_seg == nullptr)
+      return {nullptr, {}, false};
+
+    for (const FreeInterval& r : best_seg->free_intervals) {
+      if (r.end - r.start >= nbytes)
+        return {best_seg, r, true};  // free Block found
+    }
+
     return {nullptr, {}, false};  // free Block not found
   }
 
@@ -528,31 +543,6 @@ struct SpyreAllocator final : public at::Allocator {
     }
     seg->free_size -= nbytes;
   }
-
-  // SegmentInfo& createNewSegment(size_t nbytes,
-  //                               flex::DeviceMemoryAllocatorPtr allocator,
-  //                               size_t& vf_offset) {
-  // /* Allocate new Segment and create a first Block at offset 0 in it.*/
-
-  //   if (nbytes > segment_size)
-  //     throw std::runtime_error("Requested memory exceeds Segment limit.");
-
-  //   flex::DeviceMemoryAllocationPtr data;
-  //   allocator->TryAllocate(&data, segment_size, 0);  // reserve memory on Spyre but not moving tensor values into it yet
-  //   unsigned long alloc_idx = data->AllocIndex();
-
-  //   segments.emplace_back(alloc_idx, segment_size);
-  //   SegmentInfo& seg = segments.back();
-  //   seg.data = data;
-
-  //   // Insert first block
-  //   vf_offset = 0;
-  //   seg.free_size -= nbytes;
-  //   seg.free_interval_sizes.insert(seg.free_size);
-  //   seg.free_intervals.insert(FreeInterval{nbytes, segment_size});
-
-  //   return seg;
-  // }
 
   // [AF] DEBUG ONLY - to be removed or made less verbose
   void logSegmentState(const SegmentInfo& seg, const char* context,
