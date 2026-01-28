@@ -415,8 +415,18 @@ auto copy_device_to_host(const at::Tensor& self, const at::Tensor& dst) {
 }
 
 // A custom allocator for our custom device, what returns is a handle to the
+// Forward declaration for test interface
+namespace spyre {
+namespace test {
+class SpyreAllocatorTestInterface;
+}  // namespace test
+}  // namespace spyre
+
 // allocated memory not the actual pointer
 struct SpyreAllocator final : public at::Allocator {
+  // Allow test interface to access private members
+  friend class spyre::test::SpyreAllocatorTestInterface;
+
  private:
   flex::DeviceMemoryAllocatorPtr getAllocator(unsigned int dev_id) {
     return GlobalRuntime::get()
