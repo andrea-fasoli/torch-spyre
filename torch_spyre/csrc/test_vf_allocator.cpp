@@ -151,7 +151,7 @@ class TestFramework {
 TEST(FreeIntervalOrdering) {
   FreeInterval a{100, 200};
   FreeInterval b{200, 300};
-  FreeInterval c{50, 150};
+  FreeInterval c{50, 100};  // Non-overlapping intervals
   
   // Test ordering (should be by start position)
   ASSERT_TRUE(a < b);
@@ -172,13 +172,26 @@ TEST(BlockInfoCreation) {
 
 // Test SegmentInfo structure
 TEST(SegmentInfoCreation) {
-  SegmentInfo seg(123, 1024);
-  ASSERT_EQ(seg.segment_id, 123);
-  ASSERT_EQ(seg.total_size, 1024);
-  ASSERT_EQ(seg.free_size, 1024);
+  // Use realistic segment size: 8GB per segment
+  constexpr size_t GB = 1024ULL * 1024ULL * 1024ULL;
+  constexpr size_t segment_size = 8 * GB;  // 8GB
+  
+  SegmentInfo seg(0, segment_size);
+  ASSERT_EQ(seg.segment_id, 0);
+  ASSERT_EQ(seg.total_size, segment_size);
+  ASSERT_EQ(seg.free_size, segment_size);
   ASSERT_TRUE(seg.blocks.empty());
   ASSERT_TRUE(seg.free_intervals.empty());
   ASSERT_TRUE(seg.free_interval_sizes.empty());
+  
+  // Test creating multiple segments (e.g., 8 handlers)
+  std::vector<SegmentInfo> segments;
+  for (int i = 0; i < 8; i++) {
+    segments.emplace_back(i, segment_size);
+    ASSERT_EQ(segments[i].segment_id, i);
+    ASSERT_EQ(segments[i].total_size, segment_size);
+  }
+  ASSERT_EQ(segments.size(), 8);
 }
 
 // Test alignment calculation (without requiring allocator instance)
