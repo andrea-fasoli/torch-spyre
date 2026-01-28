@@ -499,16 +499,16 @@ struct SpyreAllocator final : public at::Allocator {
     size_t aligned_nbytes = setMinSpyreAllocation(nbytes);
     alloc_info = findFreeBlock(aligned_nbytes);
 
-    if (alloc_info.found) {
-      DEBUGINFO(">>> VF block allocation");
-      allocateInSegment(alloc_info.segment, alloc_info.interval, aligned_nbytes, vf_offset);
-      data = alloc_info.segment->data;  // DeviceMemoryAllocationPtr shared within Segment
-      logSegmentState(*alloc_info.segment, "After block allocation");  // [AF] very verbose
-    } else {
+    if (!alloc_info.found) {
       throw std::runtime_error(
         "Unable to find enough free memory for allocation. All " +
         std::to_string(n_segments) + " segments are full.");
     }
+
+    DEBUGINFO(">>> VF block allocation");
+    allocateInSegment(alloc_info.segment, alloc_info.interval, aligned_nbytes, vf_offset);
+    data = alloc_info.segment->data;  // DeviceMemoryAllocationPtr shared within Segment
+    logSegmentState(*alloc_info.segment, "After block allocation");  // [AF] very verbose
 
     TORCH_CHECK(data, "Failed to allocate ", aligned_nbytes, " bytes on Spyre device.");
 
@@ -517,10 +517,8 @@ struct SpyreAllocator final : public at::Allocator {
     void* ctx_void = static_cast<void*>(ctx);
     void* data_void = static_cast<void*>(ctx->owner.get());
 
-    if (alloc_info.found) { // add block info to mapping within last Segment
-      alloc_info.segment->blocks[ctx_void] = BlockInfo(vf_offset, vf_offset + aligned_nbytes);
-      block_to_segment[ctx_void] = alloc_info.segment;
-    }
+    alloc_info.segment->blocks[ctx_void] = BlockInfo(vf_offset, vf_offset + aligned_nbytes);
+    block_to_segment[ctx_void] = alloc_info.segment;
 
     return at::DataPtr(data_void, ctx_void, &ReportAndDelete, curr_device);
   }
