@@ -462,6 +462,9 @@ struct SpyreAllocator final : public at::Allocator {
                           size_t nbytes,
                           c10::Device curr_device,
                           unsigned int device_id) {
+  /* PF allocation implementation. Functionalities are preserved exactly from earlier
+  iteration of the code (PF-only).
+  */
 
     DEBUGINFO("PF allocation");
     flex::DeviceMemoryAllocationPtr data;  // a smart-pointer object
@@ -481,6 +484,11 @@ struct SpyreAllocator final : public at::Allocator {
                             size_t nbytes,
                             c10::Device curr_device,
                             unsigned int device_id) {
+  /* VF allocation implementation. A fixed number of Segments are pre-allocated upon
+  first call. Blocks are inserted into Segments following round-robin strategy
+  (memory-balanced), starting from vf_offset = 0 and progressively increasing.
+  No sub-Segment balancing is implemented at this time.
+  */
 
     flex::DeviceMemoryAllocationPtr data;  // a smart-pointer object
     AllocationInfo alloc_info{nullptr, {}, false};  // VF Mode allocation info
@@ -517,8 +525,9 @@ struct SpyreAllocator final : public at::Allocator {
     return at::DataPtr(data_void, ctx_void, &ReportAndDelete, curr_device);
   }
 
-
   void initializeSegments(flex::DeviceMemoryAllocatorPtr allocator) {
+  /* Request memory allocation on Spyre for `n_segments` of size `segment_size`. */
+
     if (!segments.empty()) return;  // Already initialized
 
     DEBUGINFO("Initializing", n_segments, "segments");
@@ -592,6 +601,7 @@ struct SpyreAllocator final : public at::Allocator {
   nbytes,   mark this memory occupied, recalculate free range, and update total Segment
   free memory.
   */
+
     vf_offset = range.start;
     seg->free_intervals.erase(range);  // remove FreeInterval selected to contain the new Block
     seg->free_interval_sizes.erase(range.end - range.start);
@@ -603,121 +613,6 @@ struct SpyreAllocator final : public at::Allocator {
     }
     seg->free_size -= nbytes;
   }
-
-  // [AF] DEBUG ONLY - to be removed or made less verbose
-  void logSegmentState(const SegmentInfo& seg, const char* context,
-                       bool include_blocks = false) {
-  /* Log free and used memory in the specified Segment. */
-
-    DEBUGINFO(context, "seg id", seg.segment_id, "free mem", seg.free_size);
-    if (include_blocks) {
-      for (const auto& [soc_ptr, block] : seg.blocks)
-        DEBUGINFO("    ctx addr", soc_ptr, "-> block bounds:", block.offset_init, block.offset_end);
-    }
-    for (const size_t& sz : seg.free_interval_sizes)
-      DEBUGINFO("  free sz", sz);
-    for (const FreeInterval& r : seg.free_intervals)
-      DEBUGINFO("  free idx", r.start, "to", r.end);
-  }
-
-  // [AF] DEBUG ONLY - to be removed or made less verbose
-  void logAllSegments(const char* context, bool include_blocks = false) {
-  /* Log free and used memory of all Segments. */
-
-    DEBUGINFO(context);
-    for (const SegmentInfo& seg : segments) {
-      logSegmentState(seg, "", include_blocks);
-    }
-  }
-
- public:
-  static SpyreAllocator& instance() {
-    static SpyreAllocator allocator;
-    return allocator;
-  }
-
-  at::DataPtr allocate(size_t nbytes) override {
-    c10::Device curr_device =
-      c10::impl::getDeviceGuardImpl(c10::DeviceType::PrivateUse1)->getDevice();
-    auto device_id = curr_device.index();
-    DEBUGINFO("allocating", nbytes, "bytes on Spyre", curr_device);
-    if (nbytes <= 0)
-      return {nullptr, nullptr, &ReportAndDelete, curr_device};
-
-    auto allocator = getAllocator(device_id);
-
-    if (use_pf) {
-      return pf_allocation(allocator, nbytes, curr_device, device_id);
-    } else {
-      return vf_allocation(allocator, nbytes, curr_device, device_id);
-    }
-  }
-
-
-
-  // at::DataPtr allocate(size_t nbytes) override {
-  //   c10::Device curr_device =
-  //     c10::impl::getDeviceGuardImpl(c10::DeviceType::PrivateUse1)->getDevice();
-  //   auto device_id = curr_device.index();
-  //   DEBUGINFO("allocating", nbytes, "bytes on Spyre", curr_device);
-  //   if (nbytes <= 0)
-  //     return {nullptr, nullptr, &ReportAndDelete, curr_device};
-
-  //   auto allocator = getAllocator(device_id);
-  //   flex::DeviceMemoryAllocationPtr data;  // a smart-pointer object
-  //   AllocationInfo alloc_info{nullptr, {}, false};  // VF Mode allocation info
-
-  //   // NOTE: vfw_ is private attribute, we need a getter in Flex for this to work
-  //   // if (
-  //   //   (allocator->vfw_ == nullptr && !use_pf) || (allocator->vfw_ != nullptr && use_pf)
-  //   // ){
-  //   //   throw std::runtime_error(
-  //   //     "Mismatched detection of PF/VF mode. "
-  //   //     "Check FLEX_DEVICE env var and vfw_ attribute of allocator."
-  //   //   );
-  //   // }
-
-  //   if (use_pf) {
-  //     DEBUGINFO("PF allocation");
-  //     allocator->TryAllocate(&data, nbytes, 0);  // [AV] last argument should be set to 0
-  //   } else {  // VF mode
-  //     /* Segments are allocated sequentially and never deallocated (for now).
-  //     Block are allocated within first (lowest offset) available free space and can be
-  //     deallocated, so that the memory can be reutilized.
-  //     This behavior may change in the future.
-  //     */
-
-  //     if (segments.empty())
-  //       initializeSegments(allocator);
-
-  //     nbytes = setMinSpyreAllocation(nbytes);
-  //     alloc_info = findFreeBlock(nbytes);
-
-  //     if (alloc_info.found) {
-  //       DEBUGINFO(">>> VF block allocation");
-  //       allocateInSegment(alloc_info.segment, alloc_info.interval, nbytes, vf_offset);
-  //       data = alloc_info.segment->data;  // DeviceMemoryAllocationPtr shared within Segment
-  //       logSegmentState(*alloc_info.segment, "After block allocation");  // [AF] very verbose
-  //     } else {
-  //       throw std::runtime_error(
-  //         "Unable to find enough free memory for allocation. All " +
-  //         std::to_string(n_segments) + " segments are full.");
-  //     }
-  //   }
-  //   TORCH_CHECK(data, "Failed to allocate ", nbytes, " bytes on Spyre device.");
-
-  //   // Instantiate object to live beyond SpyreAllocator scope
-  //   auto* ctx = new SharedOwnerCtx{std::move(data), vf_offset, device_id};
-  //   void* ctx_void = static_cast<void*>(ctx);
-  //   void* data_void = static_cast<void*>(ctx->owner.get());
-
-  //   if (!use_pf && alloc_info.found) { // add block info to mapping within last Segment
-  //     alloc_info.segment->blocks[ctx_void] = BlockInfo(vf_offset, vf_offset + nbytes);
-  //     block_to_segment[ctx_void] = alloc_info.segment;
-  //   }
-
-  //   return at::DataPtr(data_void, ctx_void, &ReportAndDelete, curr_device);
-  // }
 
   void deallocateBlock(SegmentInfo& seg, void* ctx_void) {
   /* */
@@ -774,6 +669,57 @@ struct SpyreAllocator final : public at::Allocator {
     }
 
     delete ctx;
+  }
+
+  // [AF] DEBUG ONLY - to be removed or made less verbose
+  void logSegmentState(const SegmentInfo& seg, const char* context,
+                       bool include_blocks = false) {
+  /* Log free and used memory in the specified Segment. */
+
+    DEBUGINFO(context, "seg id", seg.segment_id, "free mem", seg.free_size);
+    if (include_blocks) {
+      for (const auto& [soc_ptr, block] : seg.blocks)
+        DEBUGINFO("    ctx addr", soc_ptr, "-> block bounds:", block.offset_init, block.offset_end);
+    }
+    for (const size_t& sz : seg.free_interval_sizes)
+      DEBUGINFO("  free sz", sz);
+    for (const FreeInterval& r : seg.free_intervals)
+      DEBUGINFO("  free idx", r.start, "to", r.end);
+  }
+
+  // [AF] DEBUG ONLY - to be removed or made less verbose
+  void logAllSegments(const char* context, bool include_blocks = false) {
+  /* Log free and used memory of all Segments. */
+
+    DEBUGINFO(context);
+    for (const SegmentInfo& seg : segments) {
+      logSegmentState(seg, "", include_blocks);
+    }
+  }
+
+ public:
+  static SpyreAllocator& instance() {
+    static SpyreAllocator allocator;
+    return allocator;
+  }
+
+  at::DataPtr allocate(size_t nbytes) override {
+  /* Allocation entry point. Implement branching to PF or VF allocation. */
+
+    c10::Device curr_device =
+      c10::impl::getDeviceGuardImpl(c10::DeviceType::PrivateUse1)->getDevice();
+    auto device_id = curr_device.index();
+    DEBUGINFO("allocating", nbytes, "bytes on Spyre", curr_device);
+    if (nbytes <= 0)
+      return {nullptr, nullptr, &ReportAndDelete, curr_device};
+
+    auto allocator = getAllocator(device_id);
+
+    if (use_pf) {
+      return pf_allocation(allocator, nbytes, curr_device, device_id);
+    } else {
+      return vf_allocation(allocator, nbytes, curr_device, device_id);
+    }
   }
 
   // The raw deleter only gets passed the data ptr, no context, so
