@@ -37,7 +37,6 @@
 #include <sendnn/runtime/runtime_interface.hpp>
 #include <sendnn/tensor/sentensor_info.hpp>
 #include <sendnn/util/status.hpp>
-#include <stdexcept>  // throw exceptions
 #include <string>
 #include <utility>
 #include <vector>
@@ -437,8 +436,7 @@ struct SpyreAllocator final : public at::Allocator {
 
   bool get_function_mode() {
     const char* fmode_envvar = std::getenv("FLEX_DEVICE");
-    if (fmode_envvar == nullptr)
-      throw std::runtime_error("FLEX_DEVICE env var is not set!");
+    TORCH_CHECK(fmode_envvar != nullptr, "FLEX_DEVICE env var is not set!")
 
     std::string fmode = fmode_envvar;
     if (fmode == "VF") {
@@ -446,7 +444,7 @@ struct SpyreAllocator final : public at::Allocator {
     } else if (fmode == "PF") {
       return true;
     } else {
-      throw std::runtime_error("Unsupported FLEX_DEVICE env var value.");
+      TORCH_CHECK(false, "Unsupported FLEX_DEVICE env var value: ", fmode);
     }
   }
 
@@ -505,19 +503,16 @@ struct SpyreAllocator final : public at::Allocator {
      * at this time.
      */
 
-    flex::DeviceMemoryAllocationPtr data;           // a smart-pointer object
-    AllocationInfo alloc_info{nullptr, {}, false};  // VF Mode allocation info
+    flex::DeviceMemoryAllocationPtr data;  // a smart-pointer object
 
     if (segments.empty()) initializeSegments(allocator);
 
     size_t aligned_nbytes = setMinSpyreAllocation(nbytes);
-    alloc_info = findFreeBlock(aligned_nbytes);
+    AllocationInfo alloc_info = findFreeBlock(aligned_nbytes);
 
-    if (!alloc_info.found) {
-      throw std::runtime_error(
-          "Unable to find enough free memory for allocation. All " +
-          std::to_string(n_segments) + " segments are full.");
-    }
+    TORCH_CHECK(alloc_info.found,
+                "Unable to find enough free memory for allocation. All ",
+                n_segments, " segments are full.");
 
     allocateInSegment(alloc_info.segment, alloc_info.interval, aligned_nbytes,
                       vf_offset);
@@ -554,10 +549,7 @@ struct SpyreAllocator final : public at::Allocator {
     for (int i = 0; i < n_segments; i++) {
       flex::DeviceMemoryAllocationPtr data;
       allocator->TryAllocate(&data, segment_size, 0);
-      if (!data) {
-        throw std::runtime_error("Failed to allocate segment " +
-                                 std::to_string(i));
-      }
+      TORCH_CHECK(data, "Failed to allocate segment ", i);
       segments.emplace_back(data->AllocIndex(), segment_size);
       segments.back().data = data;
       segments.back().free_intervals.insert(FreeInterval{0, segment_size});
@@ -585,11 +577,8 @@ struct SpyreAllocator final : public at::Allocator {
     /* Locate first memory interval that can accommodate a block of size nbytes.
      */
 
-    if (nbytes > segment_size) {
-      throw std::runtime_error(
-          "Requested allocation (" + std::to_string(nbytes) + " bytes) " +
-          "exceeds segment size (" + std::to_string(segment_size) + " bytes)");
-    }
+    TORCH_CHECK(nbytes <= segment_size, "Requested allocation (", nbytes,
+                " bytes) exceeds segment size (", segment_size, " bytes)");
 
     SegmentInfo* best_seg = nullptr;
     size_t max_free_size = 0;
