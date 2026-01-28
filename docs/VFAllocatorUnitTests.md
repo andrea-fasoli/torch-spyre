@@ -247,20 +247,33 @@ if (it != end() && it->start == new_range.end) {
 
 ## Building and Running
 
-### Option 1: Standalone (Recommended for Development)
+### Prerequisites
 
+Ensure you are in the project root directory:
 ```bash
-# Navigate to csrc directory
-cd torch_spyre/csrc
-
-# Compile with test flag
-g++ -std=c++17 -DTEST_VF_ALLOCATOR test_vf_allocator.cpp -o test_vf_allocator
-
-# Run tests
-FLEX_DEVICE=VF ./test_vf_allocator
+cd /path/to/torch-spyre
 ```
 
-**Output:**
+### Option 1: Standalone (Recommended for Development)
+
+This is the default and recommended approach for testing VF allocator components without external dependencies.
+
+**Compilation:**
+```bash
+g++ -std=c++17 -DTEST_VF_ALLOCATOR torch_spyre/csrc/test_vf_allocator.cpp -o build/test_vf_allocator
+```
+
+**Running Tests:**
+```bash
+./build/test_vf_allocator
+```
+
+Or with environment variable explicitly set:
+```bash
+FLEX_DEVICE=VF ./build/test_vf_allocator
+```
+
+**Expected Output:**
 ```
 Running VF Allocator C++ Unit Tests
 ====================================
@@ -272,14 +285,6 @@ Running AlignmentCalculation... PASSED
 Running FreeIntervalMerging... PASSED
 
 Results: 5 passed, 0 failed
-```
-
-### Option 2: Google Test Integration (Future)
-
-```bash
-g++ -std=c++17 -I/path/to/gtest/include test_vf_allocator.cpp \
-    -L/path/to/gtest/lib -lgtest -lgtest_main -pthread -o test_vf_allocator
-./test_vf_allocator
 ```
 
 ## Key Testing Patterns

@@ -18,16 +18,10 @@
  * C++ Unit Tests for VF Allocator
  * 
  * This file contains unit tests for the VF allocator implementation.
- * To compile and run:
+ * To compile and run from the root folder:
  * 
- * Option 1: Using Google Test (recommended):
- *   g++ -std=c++17 -I/path/to/gtest/include test_vf_allocator.cpp \
- *       -L/path/to/gtest/lib -lgtest -lgtest_main -pthread -o test_vf_allocator
- *   ./test_vf_allocator
- * 
- * Option 2: Using simple test framework (this file):
- *   g++ -std=c++17 -DTEST_VF_ALLOCATOR test_vf_allocator.cpp -o test_vf_allocator
- *   ./test_vf_allocator
+ *   g++ -std=c++17 -DTEST_VF_ALLOCATOR torch_spyre/csrc/test_vf_allocator.cpp -o build/test_vf_allocator
+ *   ./build/test_vf_allocator
  * 
  * Note: These tests require the Flex runtime to be available and FLEX_DEVICE=VF
  * to be set. Some tests may require mocking of Flex dependencies.
