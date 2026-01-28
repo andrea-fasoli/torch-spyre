@@ -1,0 +1,42 @@
+# CMakeLists.txt for building VF Allocator C++ unit tests
+# 
+# To use this file:
+# 1. Copy this to CMakeLists.txt in a test build directory
+# 2. Or include this in your main CMakeLists.txt with:
+#    if(BUILD_TESTING)
+#      include(torch_spyre/csrc/CMakeLists_test.txt)
+#    endif()
+#
+# Prerequisites:
+# - Google Test (gtest) installed or available
+# - Flex runtime libraries
+# - PyTorch C++ API
+
+cmake_minimum_required(VERSION 3.26)
+
+# Find Google Test
+find_package(GTest REQUIRED)
+
+# Include directories
+include_directories(
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/torch_spyre/csrc
+    # Add paths to Flex, PyTorch, etc.
+)
+
+# Test executable
+add_executable(test_vf_allocator
+    torch_spyre/csrc/test_vf_allocator.cpp
+    # Add other test source files here
+)
+
+# Link libraries
+target_link_libraries(test_vf_allocator
+    GTest::gtest
+    GTest::gtest_main
+    # Add Flex, PyTorch libraries here
+)
+
+# Add test to CTest
+enable_testing()
+add_test(NAME VFAllocatorTests COMMAND test_vf_allocator)
