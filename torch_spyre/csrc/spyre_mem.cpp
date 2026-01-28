@@ -436,13 +436,13 @@ struct SpyreAllocator final : public at::Allocator {
     size_t seg_sz = size_t{12} * 1024 * 1024 * 1024,   // 12 GB Segment size (14 GB fails)
     int n_seg = 8)
     : segment_size(seg_sz), n_segments(n_seg) {
-    /* This constructor determines if using VF of PF mode based on FLEX_DEVICE env var.
-    Alternatively to the following method, we could check if allocator
-    attribute vfw_ is nullptr. If so, PF is in use, otherwise VF.
-    However, this requires allocator object of type flex::DeviceMemoryAllocatorPtr
-    to exist, which doesn't yet in this constructor. Can be checked within allocate()
-    method though. However, vfw_ is private and needs a getter created in Flex.
-    */
+  /* This constructor determines if using VF of PF mode based on FLEX_DEVICE env var.
+  * Alternatively to the following method, we could check if allocator
+  * attribute vfw_ is nullptr. If so, PF is in use, otherwise VF.
+  * However, this requires allocator object of type flex::DeviceMemoryAllocatorPtr
+  * to exist, which doesn't yet in this constructor. Can be checked within allocate()
+  * method though. However, vfw_ is private and needs a getter created in Flex.
+  */
 
     const char* fmode_envvar = std::getenv("FLEX_DEVICE");
     if (fmode_envvar == nullptr)
@@ -463,8 +463,8 @@ struct SpyreAllocator final : public at::Allocator {
                           c10::Device curr_device,
                           unsigned int device_id) {
   /* PF allocation implementation. Functionalities are preserved exactly from earlier
-  iteration of the code (PF-only).
-  */
+   * iteration of the code (PF-only).
+   */
 
     DEBUGINFO("PF allocation");
     flex::DeviceMemoryAllocationPtr data;  // a smart-pointer object
@@ -485,10 +485,10 @@ struct SpyreAllocator final : public at::Allocator {
                             c10::Device curr_device,
                             unsigned int device_id) {
   /* VF allocation implementation. A fixed number of Segments are pre-allocated upon
-  first call. Blocks are inserted into Segments following round-robin strategy
-  (memory-balanced), starting from vf_offset = 0 and progressively increasing.
-  No sub-Segment balancing is implemented at this time.
-  */
+   * first call. Blocks are inserted into Segments following round-robin strategy
+   * (memory-balanced), starting from vf_offset = 0 and progressively increasing.
+   * No sub-Segment balancing is implemented at this time.
+   */
 
     flex::DeviceMemoryAllocationPtr data;  // a smart-pointer object
     AllocationInfo alloc_info{nullptr, {}, false};  // VF Mode allocation info
@@ -598,9 +598,9 @@ struct SpyreAllocator final : public at::Allocator {
   void allocateInSegment(SegmentInfo* seg, FreeInterval range,
                          size_t nbytes, size_t& vf_offset) {
   /* Given a predetermined Segment and a free memory range that accomodates at least
-  nbytes,   mark this memory occupied, recalculate free range, and update total Segment
-  free memory.
-  */
+   * nbytes, mark this memory occupied, recalculate free range, and update total Segment
+   * free memory.
+   */
 
     vf_offset = range.start;
     seg->free_intervals.erase(range);  // remove FreeInterval selected to contain the new Block
@@ -615,7 +615,11 @@ struct SpyreAllocator final : public at::Allocator {
   }
 
   void deallocateBlock(SegmentInfo& seg, void* ctx_void) {
-  /* */
+  /* Deallocate a block from a segment and return its memory to the free pool.
+   * Merges adjacent free intervals to reduce fragmentation. Updates segment's
+   * free memory tracking and removes block from registry.
+   */
+
     auto it = seg.blocks.find(ctx_void);
     if (it == seg.blocks.end()) return;
 
