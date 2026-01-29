@@ -514,26 +514,23 @@ struct SpyreAllocator final : public at::Allocator {
                 "Unable to find enough free memory for allocation. All ",
                 n_segments, " segments are full.");
 
-    allocateInSegment(alloc_info.segment, alloc_info.interval, aligned_nbytes,
-                      vf_offset);
-
-    // DeviceMemoryAllocationPtr shared within Segment
+    // Instantiate object to live beyond SpyreAllocator scope
+    // Need to create ctx before allocateInSegment so we can store the pointer
     data = alloc_info.segment->data;
+    auto* ctx = new SharedOwnerCtx{data, vf_offset, device_id};
+    void* ctx_void = static_cast<void*>(ctx);
+    void* data_void = static_cast<void*>(ctx->owner.get());
+
+    allocateInSegment(alloc_info.segment, alloc_info.region, aligned_nbytes,
+                      vf_offset, ctx_void);
+
+    block_to_segment[ctx_void] = alloc_info.segment;
 
     if (alloc_debug)
       logSegmentState(*alloc_info.segment, "After block allocation");
 
     TORCH_CHECK(data, "Failed to allocate ", aligned_nbytes,
                 " bytes on Spyre device.");
-
-    // Instantiate object to live beyond SpyreAllocator scope
-    auto* ctx = new SharedOwnerCtx{std::move(data), vf_offset, device_id};
-    void* ctx_void = static_cast<void*>(ctx);
-    void* data_void = static_cast<void*>(ctx->owner.get());
-
-    alloc_info.segment->blocks[ctx_void] =
-        BlockInfo(vf_offset, vf_offset + aligned_nbytes);
-    block_to_segment[ctx_void] = alloc_info.segment;
 
     return at::DataPtr(data_void, ctx_void, &ReportAndDelete, curr_device);
   }
@@ -552,8 +549,9 @@ struct SpyreAllocator final : public at::Allocator {
       TORCH_CHECK(data, "Failed to allocate segment ", i);
       segments.emplace_back(data->AllocIndex(), segment_size);
       segments.back().data = data;
-      segments.back().free_intervals.insert(FreeInterval{0, segment_size});
-      segments.back().free_interval_sizes.insert(segment_size);
+      // Initialize with one large free region covering entire segment
+      segments.back().regions.insert(MemoryRegion{0, segment_size, true, nullptr});
+      segments.back().free_sizes.insert(segment_size);
     }
   }
 
@@ -569,12 +567,12 @@ struct SpyreAllocator final : public at::Allocator {
 
   struct AllocationInfo {
     SegmentInfo* segment;
-    FreeInterval interval;
+    MemoryRegion region;
     bool found;
   };
 
   AllocationInfo findFreeBlock(size_t nbytes) {
-    /* Locate first memory interval that can accommodate a block of size nbytes.
+    /* Locate first memory region that can accommodate a block of size nbytes.
      */
 
     TORCH_CHECK(nbytes <= segment_size, "Requested allocation (", nbytes,
@@ -584,8 +582,8 @@ struct SpyreAllocator final : public at::Allocator {
     size_t max_free_size = 0;
 
     for (SegmentInfo& seg : segments) {
-      if (seg.free_size < nbytes || seg.free_interval_sizes.empty() ||
-          *seg.free_interval_sizes.rbegin() < nbytes)
+      if (seg.free_size < nbytes || seg.free_sizes.empty() ||
+          *seg.free_sizes.rbegin() < nbytes)
         continue;
 
       // Track segment with most free memory
@@ -597,73 +595,90 @@ struct SpyreAllocator final : public at::Allocator {
 
     if (best_seg == nullptr) return {nullptr, {}, false};
 
-    for (const FreeInterval& r : best_seg->free_intervals) {
-      if (r.end - r.start >= nbytes)
-        return {best_seg, r, true};  // free Block found
+    for (const MemoryRegion& r : best_seg->regions) {
+      if (r.is_free && r.size() >= nbytes)
+        return {best_seg, r, true};  // free region found
     }
 
-    return {nullptr, {}, false};  // free Block not found
+    return {nullptr, {}, false};  // free region not found
   }
 
-  void allocateInSegment(SegmentInfo* seg, FreeInterval range, size_t nbytes,
-                         size_t& vf_offset) {
-    /* Given a predetermined Segment and a free memory range that accomodates at
-     * least nbytes, mark this memory occupied, recalculate free range, and
+  void allocateInSegment(SegmentInfo* seg, MemoryRegion region, size_t nbytes,
+                         size_t& vf_offset, void* ctx_void) {
+    /* Given a predetermined Segment and a free memory region that accommodates at
+     * least nbytes, mark this memory occupied, split region if needed, and
      * update total Segment free memory.
      */
 
     DEBUGINFO("VF block allocation");
-    vf_offset = range.start;
-    seg->free_intervals.erase(
-        range);  // remove FreeInterval selected to contain the new Block
-    seg->free_interval_sizes.erase(range.end - range.start);
+    vf_offset = region.start;
 
-    if (range.end - range.start >
-        nbytes) {  // if some space remains after Block creation
-      FreeInterval new_range{range.start + nbytes, range.end};
-      seg->free_intervals.insert(new_range);
-      seg->free_interval_sizes.insert(range.end - range.start - nbytes);
+    // Remove the free region
+    seg->regions.erase(region);
+    seg->free_sizes.erase(region.size());
+
+    // Insert occupied region
+    MemoryRegion occupied{region.start, region.start + nbytes, false, ctx_void};
+    auto [it, inserted] = seg->regions.insert(occupied);
+    seg->ctx_to_region[ctx_void] = const_cast<MemoryRegion*>(&(*it));
+
+    // If there's remaining space, create a new free region
+    if (region.size() > nbytes) {
+      MemoryRegion remaining{region.start + nbytes, region.end, true, nullptr};
+      seg->regions.insert(remaining);
+      seg->free_sizes.insert(remaining.size());
     }
+
     seg->free_size -= nbytes;
   }
 
   void deallocateBlock(SegmentInfo& seg, void* ctx_void) {
     /* Deallocate a block from a segment and return its memory to the free pool.
-     * Merges adjacent free intervals to reduce fragmentation. Updates segment's
+     * Merges adjacent free regions to reduce fragmentation. Updates segment's
      * free memory tracking and removes block from registry.
      */
 
-    auto it = seg.blocks.find(ctx_void);
-    if (it == seg.blocks.end()) return;
+    auto ctx_it = seg.ctx_to_region.find(ctx_void);
+    if (ctx_it == seg.ctx_to_region.end()) return;
 
     DEBUGINFO("VF block deallocation");
-    FreeInterval new_range{it->second.offset_init, it->second.offset_end};
+    MemoryRegion* occupied_region = ctx_it->second;
+    size_t freed_start = occupied_region->start;
+    size_t freed_end = occupied_region->end;
+    size_t freed_size = freed_end - freed_start;
 
-    auto& fr = seg.free_intervals;
-    auto fr_low = fr.lower_bound(new_range);
+    // Find the occupied region in the set and remove it
+    auto region_it = seg.regions.find(*occupied_region);
+    if (region_it == seg.regions.end()) return;
+    seg.regions.erase(region_it);
 
-    // Merge with previous interval if touching at new_range.start
-    if (fr_low != fr.begin()) {
-      auto prev = std::prev(fr_low);
-      if (prev->end == new_range.start) {
-        new_range.start = prev->start;
-        new_range.end = std::max(prev->end, new_range.end);
-        seg.free_interval_sizes.erase(prev->end - prev->start);
-        fr.erase(prev);
-      }
+    // Check for adjacent free regions to merge
+    MemoryRegion search_prev{freed_start - 1, freed_start, true, nullptr};
+    MemoryRegion search_next{freed_end, freed_end + 1, true, nullptr};
+
+    auto prev_it = seg.regions.lower_bound(search_prev);
+    auto next_it = seg.regions.lower_bound(search_next);
+
+    // Merge with previous free region if adjacent
+    if (prev_it != seg.regions.end() && prev_it->is_free && prev_it->end == freed_start) {
+      freed_start = prev_it->start;
+      seg.free_sizes.erase(prev_it->size());
+      seg.regions.erase(prev_it);
     }
 
-    // Merge with next interval if touching at new_range.end
-    if (fr_low != fr.end() && fr_low->start == new_range.end) {
-      new_range.end = std::max(fr_low->end, new_range.end);
-      seg.free_interval_sizes.erase(fr_low->end - fr_low->start);
-      fr.erase(fr_low);
+    // Merge with next free region if adjacent
+    if (next_it != seg.regions.end() && next_it->is_free && next_it->start == freed_end) {
+      freed_end = next_it->end;
+      seg.free_sizes.erase(next_it->size());
+      seg.regions.erase(next_it);
     }
 
-    fr.insert(new_range);
-    seg.free_interval_sizes.insert(new_range.end - new_range.start);
-    seg.free_size += it->second.offset_end - it->second.offset_init;
-    seg.blocks.erase(it);
+    // Insert the merged free region
+    MemoryRegion new_free{freed_start, freed_end, true, nullptr};
+    seg.regions.insert(new_free);
+    seg.free_sizes.insert(new_free.size());
+    seg.free_size += freed_size;
+    seg.ctx_to_region.erase(ctx_it);
   }
 
   static void ReportAndDelete(void* ctx_void) {
@@ -697,14 +712,26 @@ struct SpyreAllocator final : public at::Allocator {
     /* Log free and used memory in the specified Segment. */
 
     DEBUGINFO(context, "seg id", seg.segment_id, "free mem", seg.free_size);
+
     if (include_blocks) {
-      for (const auto& [soc_ptr, block] : seg.blocks)
-        DEBUGINFO("    ctx addr", soc_ptr,
-                  "-> block bounds:", block.offset_init, block.offset_end);
+      for (const MemoryRegion& region : seg.regions) {
+        if (!region.is_free) {
+          DEBUGINFO("    occupied region: [", region.start, ",", region.end,
+                    ") size:", region.size(), "ctx:", region.ctx_ptr);
+        }
+      }
     }
-    for (const size_t& sz : seg.free_interval_sizes) DEBUGINFO("  free sz", sz);
-    for (const FreeInterval& r : seg.free_intervals)
-      DEBUGINFO("  free idx", r.start, "to", r.end);
+
+    for (const size_t& sz : seg.free_sizes) {
+      DEBUGINFO("  free sz", sz);
+    }
+
+    for (const MemoryRegion& region : seg.regions) {
+      if (region.is_free) {
+        DEBUGINFO("  free region: [", region.start, ",", region.end,
+                  ") size:", region.size());
+      }
+    }
   }
 
   void logAllSegments(const char* context, bool include_blocks = false) {
