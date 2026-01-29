@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// cpplint: disable=readability/braces
+
 #include "spyre_mem.h"
 
 #include <ATen/EmptyTensor.h>
@@ -62,6 +64,7 @@ struct DMAParameters {
   const int64_t size_bytes;
   const off64_t src_offset;
   const off64_t dst_offset;
+  // NOLINTNEXTLINE(readability/braces)
 };
 /*
  * CPU stride for a dimension.
@@ -344,7 +347,7 @@ auto create_dma_graph(const at::Tensor& self, const at::Tensor& dst,
       sendnn::Segment::INVALID,
       sendnn::Segment::INVALID,
       sendnn::Segment::PROGRAM(128),
-  };
+  };  // NOLINT
   // STAGE 2: SenSuperNodeV2 graph
   sendnn::Graph sn_graph;  // sn = supernode
   {                        // SenSuperNodeV2 graph
@@ -571,7 +574,7 @@ struct SpyreAllocator final : public at::Allocator {
     SegmentInfo* segment;
     FreeInterval interval;
     bool found;
-  };
+  };  // NOLINT(readability/braces)
 
   AllocationInfo findFreeBlock(size_t nbytes) {
     /* Locate first memory interval that can accommodate a block of size nbytes.
