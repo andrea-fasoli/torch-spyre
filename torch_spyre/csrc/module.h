@@ -67,7 +67,7 @@ struct MemorySegment {
 
   std::set<MemoryBlock>
       blocks;  // all memory blocks (free and occupied), ordered by start offset
-  std::unordered_map<void*, MemoryBlock*>
+  std::unordered_map<SharedOwnerCtx*, MemoryBlock*>
       ctx_to_block;  // quick lookup from context to occupied block
   std::multiset<size_t>
       free_sizes;  // track sizes of all free blocks for quick lookup

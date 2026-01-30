@@ -431,7 +431,7 @@ struct SpyreAllocator final : public at::Allocator {
   std::vector<MemorySegment> segments;
   size_t segment_size;
   int n_segments;
-  std::unordered_map<void*, MemorySegment*> block_to_segment;
+  std::unordered_map<SharedOwnerCtx*, MemorySegment*> block_to_segment;
 
   // Mutex to protect shared state in VF mode
   mutable std::mutex allocator_mutex;
@@ -542,9 +542,9 @@ struct SpyreAllocator final : public at::Allocator {
     void* ctx_void = static_cast<void*>(ctx);
     void* data_void = static_cast<void*>(ctx->owner.get());
 
-    alloc_info.segment->ctx_to_block[ctx_void] =
+    alloc_info.segment->ctx_to_block[ctx] =
         const_cast<MemoryBlock*>(new_block);
-    block_to_segment[ctx_void] = alloc_info.segment;
+    block_to_segment[ctx] = alloc_info.segment;
 
     return at::DataPtr(data_void, ctx_void, &ReportAndDelete, curr_device);
   }
@@ -649,13 +649,13 @@ struct SpyreAllocator final : public at::Allocator {
     return const_cast<MemoryBlock*>(&(*block_it));
   }
 
-  void deallocateBlock(MemorySegment& seg, void* ctx_void) {
+  void deallocateBlock(MemorySegment& seg, SharedOwnerCtx* ctx) {
     /* Deallocate a block from a segment and return its memory to the free pool.
      * Merges adjacent free blocks to reduce fragmentation. Updates segment's
      * free memory tracking and removes block from registry.
      */
 
-    auto ctx_it = seg.ctx_to_block.find(ctx_void);
+    auto ctx_it = seg.ctx_to_block.find(ctx);
     if (ctx_it == seg.ctx_to_block.end()) return;
 
     DEBUGINFO("VF block deallocation");
@@ -734,9 +734,9 @@ struct SpyreAllocator final : public at::Allocator {
         allocator.logAllSegments("Pre deallocation", true);
 
       // Using lookup map for blocks into segments (O(1))
-      auto seg_it = allocator.block_to_segment.find(ctx_void);
+      auto seg_it = allocator.block_to_segment.find(ctx);
       if (seg_it != allocator.block_to_segment.end()) {
-        allocator.deallocateBlock(*seg_it->second, ctx_void);
+        allocator.deallocateBlock(*seg_it->second, ctx);
         allocator.block_to_segment.erase(seg_it);
       }
 
