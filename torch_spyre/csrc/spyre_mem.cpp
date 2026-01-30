@@ -883,7 +883,8 @@ at::Tensor spyre_empty_strided(c10::IntArrayRef size, c10::IntArrayRef stride,
   caffe2::TypeMeta dtype = c10::scalarTypeToTypeMeta(scalar_type);
   c10::Device device = device_opt.value_or(
       c10::impl::VirtualGuardImpl{c10::DeviceType::PrivateUse1}.getDevice());
-  DEBUGINFO("Size:", size, ", Stride: ", stride, " on device ", device);
+  DEBUGINFO("Tensor info on CPU (Size:", size, ", Stride: ", stride,
+            ", dtype: ", dtype, ") to be mapped onto device ", device);
   auto device_layout = SpyreTensorLayout(size.vec(), scalar_type);
   size_t size_bytes = get_device_size_in_bytes(device_layout);
 
