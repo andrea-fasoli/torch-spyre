@@ -34,6 +34,7 @@
 #include <cstdlib>  // check env vars
 #include <flex/flex_graph_builder.hpp>
 #include <memory>
+#include <mutex>
 #include <sendnn/graph/graph_builder.hpp>
 #include <sendnn/interface/graph_loader.hpp>
 #include <sendnn/runtime/runtime_interface.hpp>
@@ -434,6 +435,9 @@ struct SpyreAllocator final : public at::Allocator {
   int n_segments;
   std::unordered_map<void*, MemorySegment*> block_to_segment;
 
+  // Mutex to protect shared state in VF mode
+  mutable std::mutex allocator_mutex;
+
   // Segment size fixed to 12 GB for now (14 fails)
   static constexpr size_t DEFAULT_SEGMENT_SIZE = 12ULL * 1024 * 1024 * 1024;
   static constexpr size_t DEFAULT_N_SEGMENTS = 8;
@@ -507,6 +511,8 @@ struct SpyreAllocator final : public at::Allocator {
      * 0 and progressively increasing. No sub-Segment balancing is implemented
      * at this time.
      */
+
+    std::lock_guard<std::mutex> lock(allocator_mutex);
 
     flex::DeviceMemoryAllocationPtr data;  // a smart-pointer object
 
@@ -722,6 +728,7 @@ struct SpyreAllocator final : public at::Allocator {
     auto* ctx = static_cast<SharedOwnerCtx*>(ctx_void);
     if (!SpyreAllocator::instance().use_pf) {
       auto& allocator = SpyreAllocator::instance();
+      std::lock_guard<std::mutex> lock(allocator.allocator_mutex);
 
       if (allocator.alloc_debug)
         allocator.logAllSegments("Pre deallocation", true);
