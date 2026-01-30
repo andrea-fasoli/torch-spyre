@@ -30,40 +30,39 @@ struct SharedOwnerCtx {
   signed char device_id;
 };
 
-struct MemoryRegion {
+struct MemoryBlock {
   // Contiguous interval of memory within a Segment (either free or occupied). VF only.
 
-  size_t start;
-  size_t end;  // one past last byte
-  bool is_free;
-  void* ctx_ptr;  // SharedOwnerCtx pointer for occupied regions, nullptr for free
+  size_t start;  // block starting offset
+  size_t end;    // block ending offset (one past last byte)
+  bool is_free;  // block represents memory occupied or free
 
-  MemoryRegion() : start(0), end(0), is_free(true), ctx_ptr(nullptr) {}
-  MemoryRegion(size_t s, size_t e, bool free = true, void* ctx = nullptr)
-    : start(s), end(e), is_free(free), ctx_ptr(ctx) {}
+  MemoryBlock() : start(0), end(0), is_free(true) {}
+  MemoryBlock(size_t s, size_t e, bool free = true, void* ctx = nullptr)
+    : start(s), end(e), is_free(free) {}
 
   size_t size() const { return end - start; }
 
-  bool operator<(const MemoryRegion& other) const {
+  bool operator<(const MemoryBlock& other) const {
     return start < other.start;  // for std::set ordering
   }
 };
 
-struct SegmentInfo {
+struct MemorySegment {
   // One contiguous allocation on Spyre, via TryAllocate. VF only.
-  // Allocated memory is subdivided into MemoryRegions (free or occupied).
+  // Allocated memory is subdivided into MemoryBlocks (free or occupied).
 
   unsigned long segment_id;  // same as alloc_idx. Type: AIUMsg::V1::AllocationIndex = senlib::v2::LittleEndian<unsigned long>
-  flex::DeviceMemoryAllocationPtr data;  // in common across all ShareOwnerCtx associated with the same Segment
+  flex::DeviceMemoryAllocationPtr data;  // in common across all ShareOwnerCtx associated with the same MemorySegment
 
-  size_t total_size;
-  size_t free_size;
+  size_t total_size;  // total allocated memory for this Segment
+  size_t free_size;  // total available memory
 
-  std::set<MemoryRegion> regions;  // all memory regions (free and occupied), ordered by start offset
-  std::unordered_map<void*, MemoryRegion*> ctx_to_region;  // quick lookup from context to occupied region
-  std::multiset<size_t> free_sizes;  // track sizes of all free regions for quick lookup
+  std::set<MemoryBlock> blocks;  // all memory blocks (free and occupied), ordered by start offset
+  std::unordered_map<void*, MemoryBlock*> ctx_to_block;  // quick lookup from context to occupied block
+  std::multiset<size_t> free_sizes;  // track sizes of all free blocks for quick lookup
 
-  SegmentInfo(unsigned long idx, size_t sz)
+  MemorySegment(unsigned long idx, size_t sz)
     : segment_id(idx), total_size(sz), free_size(sz) {}
 };
 
