@@ -39,6 +39,7 @@
 #include <sendnn/tensor/sentensor_info.hpp>
 #include <sendnn/util/status.hpp>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
