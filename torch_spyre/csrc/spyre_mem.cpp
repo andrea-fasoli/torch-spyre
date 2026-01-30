@@ -505,9 +505,11 @@ struct SpyreAllocator final : public at::Allocator {
                             unsigned int device_id) {
     /* VF allocation implementation. A fixed number of Segments are
      * pre-allocated upon first call. Blocks are inserted into Segments
-     * following round-robin strategy (memory-balanced), starting from vf_offset
-     * 0 and progressively increasing. No sub-Segment balancing is implemented
-     * at this time.
+     * following a memory-balanced strategy that relies on:
+     * - selecting the Segment with most available free memory
+     * - assigning a Block to the first (= lowest offset) free memory block that
+     *   can fit the requested allocation
+     * No further sub-Segment balancing is implemented at this time.
      */
 
     std::lock_guard<std::mutex> lock(allocator_mutex);
