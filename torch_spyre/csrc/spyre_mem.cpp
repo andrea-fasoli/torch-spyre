@@ -514,8 +514,6 @@ struct SpyreAllocator final : public at::Allocator {
 
     std::lock_guard<std::mutex> lock(allocator_mutex);
 
-    flex::DeviceMemoryAllocationPtr data;  // a smart-pointer object
-
     if (segments.empty())
       initializeSegments(allocator);  // on-chip memory allocation request
 
@@ -529,7 +527,7 @@ struct SpyreAllocator final : public at::Allocator {
     MemoryBlock* new_block =
         allocateInSegment(alloc_info.segment, alloc_info.block, aligned_nbytes);
 
-    data = alloc_info.segment->data;
+    flex::DeviceMemoryAllocationPtr data = alloc_info.segment->data;
     TORCH_CHECK(data, "Failed to allocate ", aligned_nbytes,
                 " bytes on Spyre device.");
 
