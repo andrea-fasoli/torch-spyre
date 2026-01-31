@@ -21,6 +21,8 @@
 
 #include <flex/runtime.hpp>
 #include <memory>
+#include <set>
+#include <unordered_map>
 
 namespace spyre {
 
@@ -55,9 +57,8 @@ struct MemorySegment {
   // One contiguous allocation on Spyre, via TryAllocate. VF only.
   // Allocated memory is subdivided into MemoryBlocks (free or occupied).
 
-  unsigned long
-      segment_id;  // same as alloc_idx. Type: AIUMsg::V1::AllocationIndex =
-                   // senlib::v2::LittleEndian<unsigned long>
+  size_t segment_id;  // same as alloc_idx. Type: AIUMsg::V1::AllocationIndex =
+                      // senlib::v2::LittleEndian<unsigned long>
   flex::DeviceMemoryAllocationPtr
       data;  // in common across all ShareOwnerCtx associated with the same
              // MemorySegment
@@ -72,7 +73,7 @@ struct MemorySegment {
   std::multiset<size_t>
       free_sizes;  // track sizes of all free blocks for quick lookup
 
-  MemorySegment(unsigned long idx, size_t sz)
+  MemorySegment(size_t idx, size_t sz)
       : segment_id(idx), total_size(sz), free_size(sz) {}
 };
 
