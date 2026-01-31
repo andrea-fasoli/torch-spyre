@@ -545,8 +545,7 @@ struct SpyreAllocator final : public at::Allocator {
     void* ctx_void = static_cast<void*>(ctx);
     void* data_void = static_cast<void*>(ctx->owner.get());
 
-    alloc_info.segment->ctx_to_block[ctx] =
-        const_cast<MemoryBlock*>(new_block);
+    alloc_info.segment->ctx_to_block[ctx] = const_cast<MemoryBlock*>(new_block);
     block_to_segment[ctx] = alloc_info.segment;
 
     return at::DataPtr(data_void, ctx_void, &ReportAndDelete, curr_device);
@@ -673,9 +672,8 @@ struct SpyreAllocator final : public at::Allocator {
     seg.blocks.erase(block_it);
 
     // Merge with previous free block if adjacent
-    // 1. find block (as iterator) *at* the position that has just been freed
-    // 2. move to pointer to previous block (blocks is a set ordered by start
-    // offset)
+    // 1. find block (as iterator) *at or beyond* the position that was freed
+    // 2. move to pointer to previous block (blocks are ordered by offset)
     // 3. if selected block is free and adjacent to freed block:
     //    - move new starting offset at the start of selected block
     //    - remove selected block size from free_sizes
@@ -696,26 +694,20 @@ struct SpyreAllocator final : public at::Allocator {
     }
 
     // Merge with next free block if adjacent
-    // 1. find first block (as iterator) *past* the position that has just been
-    // freed
+    // 1. reusing iterator that points to block *at or beyond* the freed one
     // 2. if selected block is free and adjacent to freed block:
-    //    - move new ending offset at the end of selected block
-    //    - remove size of selected from free_sizes
+    //    - move new ending offset at the _start_ of selected block
+    //    - remove selected block size from free_sizes
     //    - remove selected block from set of all blocks
-    auto next_it =
-        seg.blocks.lower_bound(MemoryBlock{freed_end, freed_end + 1, true});
-    if (next_it != seg.blocks.end() && next_it->is_free &&
-        next_it->start == freed_end) {
-      freed_end = next_it->end;
-
-      // iterator-based erasure to remove a single value
-      auto next_size_it = seg.free_sizes.find(next_it->size());
+    if (freed_pos != seg.blocks.end() && freed_pos->is_free &&
+        freed_pos->start == freed_end) {
+      freed_end = freed_pos->end;
+      auto next_size_it = seg.free_sizes.find(freed_pos->size());
       seg.free_sizes.erase(next_size_it);
-
-      seg.blocks.erase(next_it);
+      seg.blocks.erase(freed_pos);
     }
 
-    // Insert the merged free block
+    // Insert the merged free block (with updated start/end)
     MemoryBlock new_free{freed_start, freed_end, true};
     seg.blocks.insert(new_free);
     seg.free_sizes.insert(new_free.size());
