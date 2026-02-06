@@ -254,7 +254,7 @@ auto generate_dci(const at::Tensor* tensor, SpyreTensorLayout stl,
   dci.input_shape_ = host2device ? cpu_shape : stl.device_size;
   dci.output_shape_ = host2device ? stl.device_size : cpu_shape;
   dci.exportJson(s);
-  DEBUGINFO("DataConversionInfo: ", s.str());
+  // DEBUGINFO("DataConversionInfo: ", s.str());
   return s.str();
 }
 
@@ -431,9 +431,7 @@ struct SpyreAllocator : public at::Allocator {
  protected:
   bool alloc_debug = false;  // control debug printouts
 
-  // Segment size fixed to 12 GB for now (14 fails)
-  static constexpr size_t DEFAULT_SEGMENT_SIZE = 12ULL * 1024 * 1024 * 1024;
-  static constexpr size_t DEFAULT_N_SEGMENTS = 8;
+  static constexpr size_t MAX_SEGMENTS = 12;      // NOTE: limit to be defined
   static constexpr size_t MIN_ALLOC_BYTES = 128;  // Spyre requirement
 
   flex::DeviceMemoryAllocatorPtr getAllocator(unsigned int dev_id) {
@@ -542,9 +540,12 @@ struct VFSpyreAllocator final : public SpyreAllocator {
  private:
   // Segments and Blocks storage/handling
   std::vector<MemorySegment> segments;
-  size_t segment_size;
-  int n_segments;
   std::unordered_map<SharedOwnerCtx*, MemorySegment*> block_to_segment;
+
+  // Dynamic allocation control
+  bool segments_locked;
+  std::vector<size_t> fallback_sizes;
+  size_t max_segments;
 
   // Mutex to protect shared state in VF mode
   mutable std::mutex allocator_mutex;
@@ -591,26 +592,59 @@ struct VFSpyreAllocator final : public SpyreAllocator {
     delete ctx;
   }
 
-  void initializeSegments(flex::DeviceMemoryAllocatorPtr allocator) {
-    /* Request memory allocation on Spyre for `n_segments` of size
-     * `segment_size`. */
+  bool allocateNewSegment(flex::DeviceMemoryAllocatorPtr allocator) {
+    /* Try to allocate a single new segment, attempting fallback sizes.
+     * Returns true if successful, false if all attempts fail or max reached. */
 
-    if (!segments.empty()) return;  // Already initialized
+    if (segments_locked) return false;
 
-    DEBUGINFO("Initializing", n_segments, "segments");
-
-    for (int i = 0; i < n_segments; i++) {
-      flex::DeviceMemoryAllocationPtr data;
-      allocator->TryAllocate(&data, segment_size,
-                             0);  // on-chip allocation request
-      TORCH_CHECK(data, "Failed to allocate segment ", i);
-      segments.emplace_back(data->AllocIndex(), segment_size);
-      segments.back().data = data;
-
-      // Initialize with one large free block covering entire segment
-      segments.back().blocks.insert(MemoryBlock{0, segment_size, true});
-      segments.back().free_sizes.insert(segment_size);
+    // Check if we've reached maximum number of segments
+    if (segments.size() >= max_segments) {
+      DEBUGINFO("Reached maximum number of segments (", max_segments,
+                "). Locking segments.");
+      segments_locked = true;
+      return false;
     }
+
+    for (size_t attempt_size : fallback_sizes) {
+      flex::DeviceMemoryAllocationPtr data;
+
+      try {
+        allocator->TryAllocate(&data, attempt_size, 0);
+      }
+      catch (const std::runtime_error& e) {
+        // VF allocation failed - try next fallback size
+        DEBUGINFO("TryAllocate failed for size", attempt_size, ":", e.what());
+        continue;
+      }
+
+      if (data) {
+        DEBUGINFO("Allocated new segment", segments.size() + 1, "of size",
+                  attempt_size, "bytes");
+        segments.emplace_back(data->AllocIndex(), attempt_size);
+        segments.back().data = data;
+
+        // Initialize with one large free block covering entire segment
+        segments.back().blocks.insert(MemoryBlock{0, attempt_size, true});
+        segments.back().free_sizes.insert(attempt_size);
+
+        // Check if we've now reached the maximum
+        if (segments.size() >= max_segments) {
+          DEBUGINFO("Reached maximum number of segments (", max_segments,
+                    "). Locking segments.");
+          segments_locked = true;
+        }
+
+        return true;
+      }
+    }
+
+    // All allocation attempts failed - lock segments
+    DEBUGINFO(
+        "Failed to allocate new segment with all fallback sizes. Locking "
+        "segments.");
+    segments_locked = true;
+    return false;
   }
 
   size_t setMinSpyreAllocation(size_t nbytes) const {
@@ -622,13 +656,34 @@ struct VFSpyreAllocator final : public SpyreAllocator {
     return nbytes;
   }
 
-  AllocationInfo findFreeBlock(size_t nbytes) {
+  AllocationInfo findFreeBlock(size_t nbytes,
+                               flex::DeviceMemoryAllocatorPtr allocator) {
     /* Locate first memory block that can accommodate a block of size nbytes.
-     */
+     * Until segments are locked, always attempt to allocate a new segment
+     * first. Once locked, use load-balancing across existing segments. */
 
-    TORCH_CHECK(nbytes <= segment_size, "Requested allocation (", nbytes,
-                " bytes) exceeds segment size (", segment_size, " bytes)");
+    // Check if requested size is reasonable for largest fallback size
+    if (!fallback_sizes.empty()) {
+      size_t max_segment_size = fallback_sizes[0];
+      TORCH_CHECK(nbytes <= max_segment_size, "Requested allocation (", nbytes,
+                  " bytes) exceeds maximum segment size (", max_segment_size,
+                  " bytes)");
+    }
 
+    // If segments not locked, always try to allocate a new segment first
+    if (!segments_locked) {
+      if (allocateNewSegment(allocator)) {
+        // Use the newly allocated segment (it's the last one)
+        MemorySegment* new_seg = &segments.back();
+        for (const MemoryBlock& r : new_seg->blocks) {
+          if (r.is_free && r.size() >= nbytes) return {new_seg, r, true};
+        }
+      }
+      // If allocation failed, segments are now locked, fall through to load
+      // balancing
+    }
+
+    // Load-balancing: find segment with most free memory
     MemorySegment* best_seg = nullptr;
     size_t max_free_size = 0;
 
@@ -647,6 +702,7 @@ struct VFSpyreAllocator final : public SpyreAllocator {
     if (best_seg == nullptr)
       return {nullptr, {}, false};  // not enough free memory
 
+    // Find first-fit block in best segment
     for (const MemoryBlock& r : best_seg->blocks) {
       if (r.is_free && r.size() >= nbytes)
         return {best_seg, r, true};  // free block found
@@ -786,9 +842,12 @@ struct VFSpyreAllocator final : public SpyreAllocator {
   }
 
  public:
-  VFSpyreAllocator(size_t seg_sz = DEFAULT_SEGMENT_SIZE,
-                   int n_seg = DEFAULT_N_SEGMENTS)
-      : SpyreAllocator(), segment_size(seg_sz), n_segments(n_seg) {
+  VFSpyreAllocator(size_t max_seg = MAX_SEGMENTS)
+      : SpyreAllocator(), segments_locked(false), max_segments(max_seg) {
+    // Initialize fallback sizes: 12GB, 8GB, 4GB
+    // NOTE: size selection to be defined
+    fallback_sizes = {12ULL * 1024 * 1024 * 1024, 8ULL * 1024 * 1024 * 1024,
+                      4ULL * 1024 * 1024 * 1024};
     instance_ptr.store(this, std::memory_order_release);  // atomic write
   }
 
@@ -797,13 +856,13 @@ struct VFSpyreAllocator final : public SpyreAllocator {
   }
 
   at::DataPtr allocate(size_t nbytes) override {
-    /* VF allocation implementation. A fixed number of Segments are
-     * pre-allocated upon first call. Blocks are inserted into Segments
-     * following a memory-balanced strategy that relies on:
-     * - selecting the Segment with most available free memory
-     * - assigning a Block to the first (= lowest offset) free memory block that
-     *   can fit the requested allocation
-     * No further sub-Segment balancing is implemented at this time.
+    /* VF allocation implementation with dynamic segment allocation.
+     * Segments are allocated on-demand as needed. When a new segment cannot
+     * be allocated, the vectors of segments is locked and the allocator
+     * assigns blocks using load-balancing logic across existing segments,
+     * selecting the one with most free memory, and first-fit logic within
+     * each segment, occupying the first (= lowest offset) free block that
+     * can fit the requested allocation.
      */
 
     c10::Device curr_device =
@@ -817,15 +876,14 @@ struct VFSpyreAllocator final : public SpyreAllocator {
 
     std::lock_guard<std::mutex> lock(allocator_mutex);
 
-    if (segments.empty())
-      initializeSegments(allocator);  // on-chip memory allocation request
-
     size_t aligned_nbytes = setMinSpyreAllocation(nbytes);
-    AllocationInfo alloc_info = findFreeBlock(aligned_nbytes);
+    AllocationInfo alloc_info = findFreeBlock(aligned_nbytes, allocator);
 
-    TORCH_CHECK(alloc_info.found,
-                "Unable to find enough free memory for allocation. All ",
-                n_segments, " segments are full.");
+    TORCH_CHECK(
+        alloc_info.found, "Unable to find enough free memory for allocation. ",
+        segments_locked
+            ? "All segments are full and no new segments could be allocated."
+            : "Failed to allocate memory.");
 
     MemoryBlock* new_block =
         allocateInSegment(alloc_info.segment, alloc_info.block, aligned_nbytes);
