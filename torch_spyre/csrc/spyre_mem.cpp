@@ -562,6 +562,7 @@ struct VFSpyreAllocator final : public SpyreAllocator {
     if (!ctx_void) return;
 
     auto* ctx = static_cast<SharedOwnerCtx*>(ctx_void);
+    // Atomic read to initialize allocator
     VFSpyreAllocator* allocator = instance_ptr.load(std::memory_order_acquire);
 
     // Guard against dangling pointer if allocator was destroyed
@@ -786,11 +787,11 @@ struct VFSpyreAllocator final : public SpyreAllocator {
   VFSpyreAllocator(size_t seg_sz = DEFAULT_SEGMENT_SIZE,
                    int n_seg = DEFAULT_N_SEGMENTS)
       : SpyreAllocator(), segment_size(seg_sz), n_segments(n_seg) {
-    instance_ptr.store(this, std::memory_order_release);
+    instance_ptr.store(this, std::memory_order_release);  // atomic write
   }
 
   ~VFSpyreAllocator() override {
-    instance_ptr.store(nullptr, std::memory_order_release);
+    instance_ptr.store(nullptr, std::memory_order_release);  // atomic write
   }
 
   at::DataPtr allocate(size_t nbytes) override {
@@ -834,8 +835,11 @@ struct VFSpyreAllocator final : public SpyreAllocator {
     if (alloc_debug)
       logSegmentState(*alloc_info.segment, "After block allocation");
 
-    // Instantiate object to live beyond SpyreAllocator scope
-    // Note: We share the data pointer, not move it, so the segment retains its reference
+    // Instantiating object to live beyond SpyreAllocator scope.
+    // Note: changed to share the data pointer, not move it. This is needed
+    // so that the segment retains its reference when a block is freed.
+    // With std::move(data), the segment would lose its reference to the
+    // Spyre allocation after the first block allocation
     auto* ctx =
         new SharedOwnerCtx{data, new_block->start, device_id};
     void* ctx_void = static_cast<void*>(ctx);
