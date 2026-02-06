@@ -28,6 +28,7 @@
 #include <util/sen_data_convert.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <cstdlib>  // check env vars
 #include <flex/flex_graph_builder.hpp>
@@ -468,7 +469,7 @@ struct SpyreAllocator : public at::Allocator {
 
   // A PyTorch Allocator interface method that returns a function pointer
   // for deallocating memory when only the data pointer is available (without
-  // context). Would not work right now. To implement this, we first need to
+  // context). Placeholder implementation. To implement this, we first need to
   // create a runtime interface that can correctly free an allocation only
   // based on the data ptr, without the allocation idx from the context
   at::DeleterFnPtr raw_deleter() const override {
@@ -543,8 +544,8 @@ struct VFSpyreAllocator final : public SpyreAllocator {
   // Mutex to protect shared state in VF mode
   mutable std::mutex allocator_mutex;
 
-  // Static pointer to this instance for ReportAndDelete
-  static VFSpyreAllocator* instance_ptr;
+  // Static atomic pointer to this instance for ReportAndDelete
+  static std::atomic<VFSpyreAllocator*> instance_ptr;
 
   struct AllocationInfo {
     MemorySegment* segment;
@@ -558,7 +559,14 @@ struct VFSpyreAllocator final : public SpyreAllocator {
     if (!ctx_void) return;
 
     auto* ctx = static_cast<SharedOwnerCtx*>(ctx_void);
-    VFSpyreAllocator* allocator = instance_ptr;
+    VFSpyreAllocator* allocator = instance_ptr.load(std::memory_order_acquire);
+
+    // Guard against dangling pointer if allocator was destroyed
+    if (!allocator) {
+      delete ctx;
+      return;
+    }
+
     std::lock_guard<std::mutex> lock(allocator->allocator_mutex);
 
     if (allocator->alloc_debug)
@@ -775,7 +783,11 @@ struct VFSpyreAllocator final : public SpyreAllocator {
   VFSpyreAllocator(size_t seg_sz = DEFAULT_SEGMENT_SIZE,
                    int n_seg = DEFAULT_N_SEGMENTS)
       : SpyreAllocator(), segment_size(seg_sz), n_segments(n_seg) {
-    instance_ptr = this;
+    instance_ptr.store(this, std::memory_order_release);
+  }
+
+  ~VFSpyreAllocator() override {
+    instance_ptr.store(nullptr, std::memory_order_release);
   }
 
   at::DataPtr allocate(size_t nbytes) override {
@@ -834,7 +846,7 @@ struct VFSpyreAllocator final : public SpyreAllocator {
 };
 
 // Define static member
-VFSpyreAllocator* VFSpyreAllocator::instance_ptr = nullptr;
+std::atomic<VFSpyreAllocator*> VFSpyreAllocator::instance_ptr{nullptr};
 
 // Factory method implementation (defined after derived classes)
 SpyreAllocator& SpyreAllocator::instance() {
