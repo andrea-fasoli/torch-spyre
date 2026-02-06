@@ -46,6 +46,7 @@
 
 #include "logging.h"
 #include "module.h"
+#include "spyre_allocator.h"
 #include "spyre_sendnn_utils.h"
 #include "spyre_storage_impl.h"
 #include "spyre_tensor_impl.h"
