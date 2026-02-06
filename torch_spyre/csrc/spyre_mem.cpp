@@ -489,20 +489,7 @@ struct SpyreAllocator : public at::Allocator {
   }
 
   // Factory method to create the appropriate allocator
-  static SpyreAllocator& instance() {
-    static std::unique_ptr<SpyreAllocator> allocator;
-    static std::once_flag init_flag;
-
-    std::call_once(init_flag, [&allocator]() {
-      if (is_pf_mode()) {
-        allocator.reset(new PFSpyreAllocator());
-      } else {
-        allocator.reset(new VFSpyreAllocator());
-      }
-    });
-
-    return *allocator;
-  }
+  static SpyreAllocator& instance();
 };
 
 // PF (Physical Function) Allocator - simple direct allocation
@@ -851,6 +838,22 @@ struct VFSpyreAllocator final : public SpyreAllocator {
 
 // Define static member
 VFSpyreAllocator* VFSpyreAllocator::instance_ptr = nullptr;
+
+// Factory method implementation (defined after derived classes)
+SpyreAllocator& SpyreAllocator::instance() {
+  static std::unique_ptr<SpyreAllocator> allocator;
+  static std::once_flag init_flag;
+
+  std::call_once(init_flag, [&allocator]() {
+    if (is_pf_mode()) {
+      allocator.reset(new PFSpyreAllocator());
+    } else {
+      allocator.reset(new VFSpyreAllocator());
+    }
+  });
+
+  return *allocator;
+}
 
 // Register our custom allocator
 REGISTER_ALLOCATOR(c10::DeviceType::PrivateUse1, &SpyreAllocator::instance());
