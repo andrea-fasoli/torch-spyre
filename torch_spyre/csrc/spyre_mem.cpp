@@ -479,7 +479,8 @@ struct SpyreAllocator : public at::Allocator {
 
   // A PyTorch Allocator interface method for copying data between allocations
   // managed by this allocator. Placeholder implementation.
-  void copy_data(void* dest, const void* src, std::size_t count) const override {
+  void copy_data(void* dest, const void* src,
+                 std::size_t count) const override {
     py::gil_scoped_acquire acquire;  // Python thread-safety mechanism
     DEBUGINFO("entering allocator->copy_data method");
     // do nothing -- look into when this is called
@@ -838,8 +839,7 @@ struct VFSpyreAllocator final : public SpyreAllocator {
     // so that the segment retains its reference when a block is freed.
     // With std::move(data), the segment would lose its reference to the
     // Spyre allocation after the first block allocation
-    auto* ctx =
-        new SharedOwnerCtx{data, new_block->start, device_id};
+    auto* ctx = new SharedOwnerCtx{data, new_block->start, device_id};
     void* ctx_void = static_cast<void*>(ctx);
     void* data_void = static_cast<void*>(ctx->owner.get());
 
