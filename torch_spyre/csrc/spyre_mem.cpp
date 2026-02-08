@@ -933,6 +933,19 @@ SpyreAllocator& SpyreAllocator::instance() {
 // Register our custom allocator
 REGISTER_ALLOCATOR(c10::DeviceType::PrivateUse1, &SpyreAllocator::instance());
 
+// Returns the current allocator mode based on FLEX_DEVICE environment variable
+std::string get_allocator_mode() {
+  const char* fmode_envvar = std::getenv("FLEX_DEVICE");
+  if (fmode_envvar == nullptr) {
+    return "UNKNOWN";
+  }
+  std::string fmode = fmode_envvar;
+  if (fmode == "VF" || fmode == "PF") {
+    return fmode;
+  }
+  return "UNKNOWN";
+}
+
 // Empty op needs C++ code and cannot be handled by python side fallback
 at::Tensor spyre_empty(c10::IntArrayRef size,
                        std::optional<c10::ScalarType> dtype_opt,
@@ -1124,26 +1137,45 @@ at::Tensor to_with_layout(const at::Tensor& self,
   return spyre_copy_from(self, dst, false);
 }
 
+at::Tensor empty_with_layout(
+    c10::IntArrayRef size, SpyreTensorLayout device_layout,
+    std::optional<c10::ScalarType> dtype_opt,
+    std::optional<c10::Layout> layout_opt,
+    std::optional<c10::Device> device_opt, std::optional<bool> pin_memory_opt,
+    std::optional<c10::MemoryFormat> memory_format_opt) {
+  c10::Device device = device_opt.value_or(
+      c10::impl::VirtualGuardImpl{c10::DeviceType::PrivateUse1}.getDevice());
+  DEBUGINFO("shape=", size, " on Spyre ", device);
+  const auto dtype = c10::dtype_or_default(dtype_opt);
+  TORCH_CHECK(device.is_privateuseone());
+  TORCH_CHECK(c10::layout_or_default(layout_opt) == c10::Layout::Strided,
+              "Non strided layout not supported");
+  TORCH_CHECK(!c10::pinned_memory_or_default(pin_memory_opt),
+              "Pin memory can only be on CPU");
+  const c10::DeviceGuard device_guard(device);
+
+  size_t size_bytes = get_device_size_in_bytes(device_layout);
+  constexpr c10::DispatchKeySet pu1_dks(c10::DispatchKey::PrivateUse1);
+  auto tensor = at::detail::make_tensor_base<SpyreTensorImpl>(
+      c10::Storage(c10::make_intrusive<SpyreStorageImpl>(
+          c10::StorageImpl::use_byte_size_t(), size_bytes,
+          &SpyreAllocator::instance(),
+          /*resizeable=*/true)),
+      pu1_dks, c10::scalarTypeToTypeMeta(dtype));
+
+  tensor.unsafeGetTensorImpl()->set_sizes_contiguous(size);
+  static_cast<SpyreTensorImpl*>(tensor.unsafeGetTensorImpl())->spyre_layout =
+      device_layout;
+  DEBUGINFO("SpyreTensorLayout: ", device_layout.toString());
+  return tensor;
+}
+
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   m.impl("empty.memory_format", TORCH_FN(spyre_empty));
   m.impl("empty_strided", TORCH_FN(spyre_empty_strided));
   m.impl("as_strided", TORCH_FN(spyre_as_strided));
   m.impl("set_.source_Storage_storage_offset", TORCH_FN(spyre_set_storage));
   m.impl("_copy_from", TORCH_FN(spyre_copy_from));
-}
-
-std::string get_allocator_mode() {
-  const char* fmode_envvar = std::getenv("FLEX_DEVICE");
-  if (fmode_envvar == nullptr) {
-    return "UNKNOWN";
-  }
-  std::string fmode = fmode_envvar;
-  if (fmode == "VF") {
-    return "VF";
-  } else if (fmode == "PF") {
-    return "PF";
-  }
-  return "UNKNOWN";
 }
 
 }  // namespace spyre

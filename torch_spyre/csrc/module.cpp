@@ -318,4 +318,6 @@ PYBIND11_MODULE(_C, m) {
   m.def("set_downcast_warning", &spyre::set_downcast_warn_enabled,
         "Enable/disable downcast warnings for this process.");
   m.def("get_elem_in_stick", &spyre::get_elem_in_stick);
+  m.def("get_allocator_mode", &spyre::get_allocator_mode,
+        "Return the current allocator mode: 'VF', 'PF', or 'UNKNOWN'.");
 }
