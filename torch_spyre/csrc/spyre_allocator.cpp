@@ -25,6 +25,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
 
 #include "logging.h"
 #include "module.h"
@@ -102,8 +103,7 @@ at::DataPtr PFSpyreAllocator::allocate(size_t nbytes) {
    */
 
   c10::Device curr_device =
-      c10::impl::getDeviceGuardImpl(c10::DeviceType::PrivateUse1)
-          ->getDevice();
+      c10::impl::getDeviceGuardImpl(c10::DeviceType::PrivateUse1)->getDevice();
   auto device_id = curr_device.index();
   DEBUGINFO("allocating", nbytes, "bytes on Spyre", curr_device, "(PF mode)");
   if (nbytes <= 0) return {nullptr, nullptr, &ReportAndDelete, curr_device};
@@ -224,8 +224,7 @@ size_t VFSpyreAllocator::setMinSpyreAllocation(size_t nbytes) const {
   /* Adjust allocation according to Spyre requirement. */
 
   if (nbytes % MIN_ALLOC_BYTES != 0)
-    return ((nbytes + MIN_ALLOC_BYTES - 1) / MIN_ALLOC_BYTES) *
-           MIN_ALLOC_BYTES;
+    return ((nbytes + MIN_ALLOC_BYTES - 1) / MIN_ALLOC_BYTES) * MIN_ALLOC_BYTES;
   return nbytes;
 }
 
@@ -391,9 +390,8 @@ void VFSpyreAllocator::logSegmentState(const MemorySegment& seg,
     // ctx_to_block only tracks *occupied* blocks (via their pointer)
     // and the corresponding SharedOwnerCtx pointer
     for (const auto& [soc_ptr, block_ptr] : seg.ctx_to_block) {
-      DEBUGINFO("    occupied block: [", block_ptr->start, ",",
-                block_ptr->end, ") size:", block_ptr->size(),
-                "ctx:", soc_ptr);
+      DEBUGINFO("    occupied block: [", block_ptr->start, ",", block_ptr->end,
+                ") size:", block_ptr->size(), "ctx:", soc_ptr);
     }
 
     // seg.blocks includes both free and occupied blocks
@@ -442,8 +440,7 @@ at::DataPtr VFSpyreAllocator::allocate(size_t nbytes) {
    */
 
   c10::Device curr_device =
-      c10::impl::getDeviceGuardImpl(c10::DeviceType::PrivateUse1)
-          ->getDevice();
+      c10::impl::getDeviceGuardImpl(c10::DeviceType::PrivateUse1)->getDevice();
   auto device_id = curr_device.index();
   DEBUGINFO("allocating", nbytes, "bytes on Spyre", curr_device, "(VF mode)");
   if (nbytes <= 0) return {nullptr, nullptr, &ReportAndDelete, curr_device};
@@ -508,4 +505,5 @@ SpyreAllocator& SpyreAllocator::instance() {
 }  // namespace spyre
 
 // Register our custom allocator
-REGISTER_ALLOCATOR(c10::DeviceType::PrivateUse1, &spyre::SpyreAllocator::instance());
+REGISTER_ALLOCATOR(c10::DeviceType::PrivateUse1,
+                   &spyre::SpyreAllocator::instance());

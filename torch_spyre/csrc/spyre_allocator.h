@@ -17,12 +17,14 @@
 #pragma once
 
 #include <c10/core/Allocator.h>
-#include <flex/runtime.hpp>
+
 #include <atomic>
+#include <flex/runtime.hpp>
 #include <memory>
 #include <mutex>
 #include <set>
 #include <unordered_map>
+#include <vector>
 
 #include "module.h"
 
@@ -96,8 +98,7 @@ struct SpyreAllocator : public at::Allocator {
   virtual ~SpyreAllocator() = default;
 
   at::DeleterFnPtr raw_deleter() const override;
-  void copy_data(void* dest, const void* src,
-                 std::size_t count) const override;
+  void copy_data(void* dest, const void* src, std::size_t count) const override;
 
   // Factory method to create the appropriate allocator
   static SpyreAllocator& instance();
