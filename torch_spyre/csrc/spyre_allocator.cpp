@@ -361,7 +361,7 @@ void VFSpyreAllocator::deallocateBlock(MemorySegment& seg,
   // Merge with next free block if adjacent
   // 1. reusing iterator that points to block *at or beyond* the freed one
   // 2. if selected block is free and adjacent to freed block:
-  //    - move new ending offset at the _start_ of selected block
+  //    - move new ending offset at the end of selected block
   //    - remove selected block size from free_sizes
   //    - remove selected block from set of all blocks
   if (freed_pos != seg.blocks.end() && freed_pos->is_free &&

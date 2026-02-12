@@ -37,7 +37,7 @@ struct MemoryBlock {
   bool is_free;  // block represents memory occupied or free
 
   MemoryBlock() : start(0), end(0), is_free(true) {}
-  MemoryBlock(size_t s, size_t e, bool free = true, void* ctx = nullptr)
+  MemoryBlock(size_t s, size_t e, bool free = true)
       : start(s), end(e), is_free(free) {}
 
   size_t size() const {
