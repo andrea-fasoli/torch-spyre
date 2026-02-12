@@ -66,8 +66,8 @@ struct MemorySegment {
   std::multiset<size_t>
       free_sizes;  // track sizes of all free blocks for quick lookup
 
-  MemorySegment(size_t idx, size_t sz)
-      : segment_id(idx), total_size(sz), free_size(sz) {}
+  MemorySegment(size_t seg_id, size_t sz)
+      : segment_id(seg_id), total_size(sz), free_size(sz) {}
 };
 
 }  // namespace spyre
