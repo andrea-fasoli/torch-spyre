@@ -16,8 +16,11 @@
 
 #pragma once
 
+#include <c10/core/Allocator.h>
 #include <flex/runtime.hpp>
+#include <atomic>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <unordered_map>
 
@@ -68,6 +71,88 @@ struct MemorySegment {
 
   MemorySegment(size_t seg_id, size_t sz)
       : segment_id(seg_id), total_size(sz), free_size(sz) {}
+};
+
+// Forward declarations for derived allocator classes
+struct PFSpyreAllocator;
+struct VFSpyreAllocator;
+
+// Base allocator class, no longer final to allow inheritance
+struct SpyreAllocator : public at::Allocator {
+ protected:
+  bool alloc_debug = false;  // control debug printouts
+
+  static constexpr size_t MAX_SEGMENTS = 12;      // NOTE: limit to be defined
+  static constexpr size_t MIN_ALLOC_BYTES = 128;  // Spyre requirement
+
+  flex::DeviceMemoryAllocatorPtr getAllocator(unsigned int dev_id);
+
+  static bool is_pf_mode();
+  static bool is_alloc_debug();
+
+  SpyreAllocator();
+
+ public:
+  virtual ~SpyreAllocator() = default;
+
+  at::DeleterFnPtr raw_deleter() const override;
+  void copy_data(void* dest, const void* src,
+                 std::size_t count) const override;
+
+  // Factory method to create the appropriate allocator
+  static SpyreAllocator& instance();
+};
+
+// PF (Physical Function) Allocator - simple direct allocation
+struct PFSpyreAllocator final : public SpyreAllocator {
+ private:
+  static void ReportAndDelete(void* ctx_void);
+
+ public:
+  PFSpyreAllocator();
+  at::DataPtr allocate(size_t nbytes) override;
+};
+
+// VF (Virtual Function) Allocator - complex segment-based allocation
+struct VFSpyreAllocator final : public SpyreAllocator {
+ private:
+  // Segments and Blocks storage/handling
+  std::vector<MemorySegment> segments;
+  std::unordered_map<SharedOwnerCtx*, MemorySegment*> block_to_segment;
+
+  // Dynamic allocation control
+  bool segments_locked;
+  std::vector<size_t> fallback_sizes;
+  size_t max_segments;
+
+  // Mutex to protect shared state in VF mode
+  mutable std::mutex allocator_mutex;
+
+  // Static atomic pointer to this instance for ReportAndDelete
+  static std::atomic<VFSpyreAllocator*> instance_ptr;
+
+  struct AllocationInfo {
+    MemorySegment* segment;
+    MemoryBlock block;
+    bool found;
+  };
+
+  static void ReportAndDelete(void* ctx_void);
+  bool allocateNewSegment(flex::DeviceMemoryAllocatorPtr allocator);
+  size_t setMinSpyreAllocation(size_t nbytes) const;
+  AllocationInfo findFreeBlock(size_t nbytes,
+                               flex::DeviceMemoryAllocatorPtr allocator);
+  MemoryBlock* allocateInSegment(MemorySegment* seg, MemoryBlock block,
+                                 size_t nbytes);
+  void deallocateBlock(MemorySegment& seg, SharedOwnerCtx* ctx);
+  void logSegmentState(const MemorySegment& seg, const char* context,
+                       bool include_blocks = false);
+  void logAllSegments(const char* context, bool include_blocks = false);
+
+ public:
+  VFSpyreAllocator(size_t max_seg = MAX_SEGMENTS);
+  ~VFSpyreAllocator() override;
+  at::DataPtr allocate(size_t nbytes) override;
 };
 
 }  // namespace spyre
