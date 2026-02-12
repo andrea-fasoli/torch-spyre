@@ -442,6 +442,8 @@ struct SpyreAllocator : public at::Allocator {
     TORCH_CHECK(fmode_envvar != nullptr, "FLEX_DEVICE env var is not set!")
 
     std::string fmode = fmode_envvar;
+    // Capitalize fmode to handle lowercase env var values (e.g., "vf" or "pf")
+    std::transform(fmode.begin(), fmode.end(), fmode.begin(), ::toupper);
     if (fmode == "VF") {
       return false;
     } else if (fmode == "PF") {
