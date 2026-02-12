@@ -87,7 +87,7 @@ struct SpyreAllocator : public at::Allocator {
   static constexpr size_t MAX_SEGMENTS = 12;      // NOTE: limit to be defined
   static constexpr size_t MIN_ALLOC_BYTES = 128;  // Spyre requirement
 
-  flex::DeviceMemoryAllocatorPtr getAllocator(unsigned int dev_id);
+  flex::DeviceMemoryAllocatorPtr getFlexAllocator(unsigned int dev_id);
 
   static bool is_pf_mode();
   static bool is_alloc_debug();

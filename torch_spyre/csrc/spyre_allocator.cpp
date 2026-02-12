@@ -36,7 +36,7 @@ namespace spyre {
 // SpyreAllocator - Base Class Implementation
 // ============================================================================
 
-flex::DeviceMemoryAllocatorPtr SpyreAllocator::getAllocator(
+flex::DeviceMemoryAllocatorPtr SpyreAllocator::getFlexAllocator(
     unsigned int dev_id) {
   return GlobalRuntime::get()
       ->GetDeviceHandle(dev_id)
@@ -108,7 +108,7 @@ at::DataPtr PFSpyreAllocator::allocate(size_t nbytes) {
   DEBUGINFO("allocating", nbytes, "bytes on Spyre", curr_device, "(PF mode)");
   if (nbytes <= 0) return {nullptr, nullptr, &ReportAndDelete, curr_device};
 
-  auto allocator = getAllocator(device_id);
+  auto allocator = getFlexAllocator(device_id);
 
   DEBUGINFO("PF allocation");
   flex::DeviceMemoryAllocationPtr data;      // a smart-pointer object
@@ -445,7 +445,7 @@ at::DataPtr VFSpyreAllocator::allocate(size_t nbytes) {
   DEBUGINFO("allocating", nbytes, "bytes on Spyre", curr_device, "(VF mode)");
   if (nbytes <= 0) return {nullptr, nullptr, &ReportAndDelete, curr_device};
 
-  auto allocator = getAllocator(device_id);
+  auto allocator = getFlexAllocator(device_id);
 
   std::lock_guard<std::mutex> lock(allocator_mutex);
 
