@@ -416,9 +416,6 @@ auto copy_device_to_host(const at::Tensor& self, const at::Tensor& dst) {
   SEN_THROW_NOK(gl->Copy({out_tensor}, sendnn::Inputs(), sn_idx));
 }
 
-// A custom allocator for our custom device, what returns is a handle to the
-// allocated memory not the actual pointer
-
 // Empty op needs C++ code and cannot be handled by python side fallback
 at::Tensor spyre_empty(c10::IntArrayRef size,
                        std::optional<c10::ScalarType> dtype_opt,
