@@ -82,8 +82,6 @@ struct VFSpyreAllocator;
 // Base allocator class, no longer final to allow inheritance
 struct SpyreAllocator : public at::Allocator {
  protected:
-  bool alloc_debug = false;  // control debug printouts
-
   static constexpr size_t MAX_SEGMENTS = 12;      // NOTE: limit to be defined
   static constexpr size_t MIN_ALLOC_BYTES = 128;  // Spyre requirement
 
@@ -125,6 +123,9 @@ struct VFSpyreAllocator final : public SpyreAllocator {
   bool segments_locked;
   std::vector<size_t> fallback_sizes;
   size_t max_segments;
+
+  // Debug control
+  bool alloc_debug = false;  // control debug printouts
 
   // Mutex to protect shared state in VF mode
   mutable std::mutex allocator_mutex;

@@ -67,9 +67,7 @@ bool SpyreAllocator::is_alloc_debug() {
   return alloc_debug_str == "1";
 }
 
-SpyreAllocator::SpyreAllocator() {
-  alloc_debug = is_alloc_debug();
-}
+SpyreAllocator::SpyreAllocator() {}
 
 at::DeleterFnPtr SpyreAllocator::raw_deleter() const {
   return nullptr;
@@ -245,14 +243,14 @@ VFSpyreAllocator::AllocationInfo VFSpyreAllocator::findFreeBlock(
   // If segments not locked, always try to allocate a new segment first
   if (!segments_locked) {
     if (allocateNewSegment(allocator)) {
-      // Use the newly allocated segment (it's the last one)
+      // Use the newly allocated segment (the last one in segments vector)
       MemorySegment* new_seg = &segments.back();
       for (const MemoryBlock& r : new_seg->blocks) {
         if (r.is_free && r.size() >= nbytes) return {new_seg, r, true};
       }
     }
-    // If allocation failed, segments are now locked, fall through to load
-    // balancing
+    // If allocation failed, segments are now locked, fall through to
+    // load-balancing
   }
 
   // Load-balancing: find segment with most free memory
@@ -418,6 +416,9 @@ void VFSpyreAllocator::logAllSegments(const char* context,
 
 VFSpyreAllocator::VFSpyreAllocator(size_t max_seg)
     : SpyreAllocator(), segments_locked(false), max_segments(max_seg) {
+  // Initialize extensive debug printout flag
+  alloc_debug = is_alloc_debug();
+
   // Initialize fallback sizes: 12GB, 8GB, 4GB
   // NOTE: size selection to be defined
   fallback_sizes = {12ULL * 1024 * 1024 * 1024, 8ULL * 1024 * 1024 * 1024,
