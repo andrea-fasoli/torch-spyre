@@ -376,6 +376,139 @@ class TestAllocatorE2E(TestCase):
             final_stats["allocated_bytes"], initial_stats["allocated_bytes"]
         )
 
+    def test_gc_residual_data_on_reuse(self):
+        """
+        Garbage Collector-driven residual data on reuse
+
+        Verify that when a freed block is reused for a new tensor, residual data
+        from the previous tensor is not observable. The allocator must either:
+        (a) zero the memory, or (b) match CPU allocator semantics.
+
+        This test ensures the policy is defined and enforced - residual bytes
+        must not silently leak into a new tensor.
+
+        Steps:
+        1. Allocate t1, fill with sentinel pattern
+        2. Record t1's data pointer
+        3. Delete t1 and force gc.collect()
+        4. Allocate t2 of same size, verify it reuses same pointer
+        5. Compare t2's contents against CPU allocator behavior
+        """
+        N = 1024  # test tensor size
+
+        # Sentinel pattern: using a distinctive value that's unlikely to appear randomly
+        sentinel_value = -31744.0  # 0xF800 in float16 (large negative)
+
+        initial_stats = get_allocator_stats()
+
+        # First, establish CPU allocator baseline behavior
+        # Allocate on CPU, fill with sentinel, delete, reallocate
+        cpu_t1 = torch.empty((N,), device="cpu", dtype=torch.float16)
+        cpu_t1.fill_(sentinel_value)
+        cpu_t1_ptr = cpu_t1.data_ptr()
+        del cpu_t1
+        gc.collect()
+
+        cpu_t2 = torch.empty((N,), device="cpu", dtype=torch.float16)
+        cpu_t2_ptr = cpu_t2.data_ptr()
+
+        # Check if CPU reused memory and what the contents are
+        cpu_reused = (cpu_t2_ptr == cpu_t1_ptr)
+        if cpu_reused:
+            cpu_is_zeroed = torch.all(cpu_t2 == 0.0).item()
+            cpu_has_sentinel = torch.any(cpu_t2 == sentinel_value).item()
+        else:
+            # CPU didn't reuse - we'll just verify Spyre zeros or matches this behavior
+            cpu_is_zeroed = None
+            cpu_has_sentinel = None
+
+        del cpu_t2
+        gc.collect()
+
+        # Now test Spyre allocator
+        # Step 1: Allocate t1 and fill with sentinel
+        t1 = torch.empty((N,), dtype=torch.float16, device="spyre")
+        t1.fill_(sentinel_value)
+
+        # Verify sentinel was written (transfer to CPU for verification)
+        t1_cpu = t1.cpu()
+        self.assertTrue(
+            torch.all(t1_cpu == sentinel_value),
+            "Sentinel pattern should be written to t1"
+        )
+
+        # Step 2: Record t1's data pointer
+        t1_ptr = t1.data_ptr()
+        self.assertGreater(t1_ptr, 0, "t1 should have valid data pointer")
+
+        # Step 3: Delete t1 and force GC
+        del t1
+        del t1_cpu
+        gc.collect()
+
+        # Verify t1 was deallocated
+        stats_after_gc = get_allocator_stats()
+        self.assertEqual(
+            stats_after_gc["allocated_bytes"],
+            initial_stats["allocated_bytes"],
+            "Memory should be freed after t1 deletion and GC"
+        )
+
+        # Step 4: Allocate t2 of same size and verify reuse
+        t2 = torch.empty((N,), device="spyre", dtype=torch.float16)
+        t2_ptr = t2.data_ptr()
+        self.assertGreater(t2_ptr, 0, "t2 should have valid data pointer")
+
+        # Verify memory was reused (same pointer)
+        self.assertEqual(
+            t2_ptr, t1_ptr,
+            f"Expected memory reuse: t2 should have same pointer as t1. "
+            f"t1_ptr={hex(t1_ptr)}, t2_ptr={hex(t2_ptr)}"
+        )
+
+        # Step 5: Verify residual data policy matches specification
+        # Transfer to CPU for verification
+        t2_cpu = t2.cpu()
+
+        # The spec says: verify either (a) contents are zero, or
+        # (b) contents match CPU allocator semantics
+        spyre_is_zeroed = torch.all(t2_cpu == 0.0).item()
+        spyre_has_sentinel = torch.any(t2_cpu == sentinel_value).item()
+
+        # Policy check: Memory should be either zeroed OR match CPU behavior
+        if spyre_is_zeroed:
+            # Case (a): Memory is zeroed - this is acceptable
+            print(f"[TEST DEBUG] Spyre memory is zeroed (PASS - Case a)")
+            print(f"  CPU: reused={cpu_reused}, zeroed={cpu_is_zeroed}, has_sentinel={cpu_has_sentinel}")
+        elif cpu_reused and cpu_has_sentinel:
+            # Case (b): CPU also leaked sentinel, so Spyre matching is acceptable
+            # (though both should ideally zero)
+            print(f"[TEST DEBUG] Data leaked but CPU also leaked (PASS - Case b)")
+            print(f"  Spyre: has_sentinel={spyre_has_sentinel}")
+            print(f"  CPU: reused={cpu_reused}, zeroed={cpu_is_zeroed}, has_sentinel={cpu_has_sentinel}")
+        else:
+            # FAIL: Spyre has sentinel but shouldn't
+            self.assertFalse(
+                spyre_has_sentinel,
+                f"Residual data leak detected: Reused memory at {hex(t2_ptr)} contains "
+                f"sentinel values from previous tensor. Memory should be zeroed or match "
+                f"CPU allocator semantics. CPU: reused={cpu_reused}, "
+                f"zeroed={cpu_is_zeroed}, has_sentinel={cpu_has_sentinel}"
+            )
+
+        # Cleanup
+        del t2
+        del t2_cpu
+        gc.collect()
+
+        # Final verification: no memory leak
+        final_stats = get_allocator_stats()
+        self.assertEqual(
+            final_stats["allocated_bytes"],
+            initial_stats["allocated_bytes"],
+            "All memory should be freed after test completion"
+        )
+
 
 if __name__ == "__main__":
     from torch.testing._internal.common_utils import run_tests
