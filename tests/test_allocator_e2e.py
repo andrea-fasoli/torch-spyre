@@ -649,6 +649,196 @@ class TestAllocatorE2E(TestCase):
         print(f"  Allocations: {initial_num_allocs} → {stats_after_alloc['num_allocs']} → {final_num_allocs}")
         print(f"  Bytes: {initial_allocated_bytes} → {stats_after_alloc['allocated_bytes']} → {final_allocated_bytes}")
 
+    def test_gc_mixed_scope_release(self):
+        """
+        Garbage Collector mixed-scope release
+
+        Allocate tensors across several Python scopes:
+        - Some held in module-level globals (still reachable)
+        - Others in function locals (unreachable after function return)
+
+        After gc.collect(), verify that exactly the unreachable ones were released
+        and the reachable ones remain allocated.
+
+        This test verifies that Python's garbage collector correctly distinguishes
+        between reachable and unreachable tensors, and only frees the unreachable ones.
+        """
+        # Record baseline allocator state
+        initial_stats = get_allocator_stats()
+        initial_allocated_bytes = initial_stats["allocated_bytes"]
+        initial_num_allocs = initial_stats["num_allocs"]
+
+        print(f"[TEST DEBUG] Initial state: {initial_num_allocs} allocs, {initial_allocated_bytes} bytes")
+
+        # Module-level globals that will remain reachable
+        # We'll use a dictionary to simulate module globals
+        module_globals = {}
+
+        # Size constants
+        GLOBAL_SIZE = 4096  # 16KB per global tensor
+        LOCAL_SIZE = 2048   # 8KB per local tensor
+        NUM_GLOBALS = 3
+        NUM_LOCALS = 5
+
+        # Allocate global tensors (these will remain reachable)
+        for i in range(NUM_GLOBALS):
+            tensor = torch.empty((GLOBAL_SIZE,), device="spyre", dtype=torch.float32)
+            self.assertGreater(tensor.data_ptr(), 0, f"Global tensor {i} should have valid data pointer")
+            module_globals[f"global_tensor_{i}"] = tensor
+
+        # Delete loop variables to avoid holding extra references
+        del tensor
+        del i
+
+        # Verify global tensors were allocated
+        stats_after_globals = get_allocator_stats()
+        globals_allocated_bytes = stats_after_globals["allocated_bytes"] - initial_allocated_bytes
+        globals_num_allocs = stats_after_globals["num_allocs"] - initial_num_allocs
+
+        self.assertEqual(
+            globals_num_allocs,
+            NUM_GLOBALS,
+            f"Expected {NUM_GLOBALS} global allocations, got {globals_num_allocs}"
+        )
+        self.assertGreater(
+            globals_allocated_bytes,
+            0,
+            "Global tensors should allocate memory"
+        )
+
+        print(f"[TEST DEBUG] After global allocation: {stats_after_globals['num_allocs']} allocs, "
+              f"{stats_after_globals['allocated_bytes']} bytes "
+              f"(+{globals_num_allocs} allocs, +{globals_allocated_bytes} bytes)")
+
+        # Function that allocates local tensors (unreachable after return)
+        def allocate_local_tensors():
+            """Allocate tensors in function scope that will be unreachable after return."""
+            local_tensors = []
+            for i in range(NUM_LOCALS):
+                tensor = torch.empty((LOCAL_SIZE,), device="spyre", dtype=torch.float32)
+                self.assertGreater(tensor.data_ptr(), 0, f"Local tensor {i} should have valid data pointer")
+                local_tensors.append(tensor)
+
+            # Verify local tensors were allocated
+            stats_with_locals = get_allocator_stats()
+            return stats_with_locals
+
+        # Call function to allocate local tensors
+        stats_with_locals = allocate_local_tensors()
+
+        # At this point, local_tensors list is out of scope and unreachable
+        # but the memory hasn't been freed yet (GC hasn't run)
+        total_allocated_bytes = stats_with_locals["allocated_bytes"] - initial_allocated_bytes
+        total_num_allocs = stats_with_locals["num_allocs"] - initial_num_allocs
+
+        self.assertEqual(
+            total_num_allocs,
+            NUM_GLOBALS + NUM_LOCALS,
+            f"Expected {NUM_GLOBALS + NUM_LOCALS} total allocations, got {total_num_allocs}"
+        )
+
+        print(f"[TEST DEBUG] After local allocation: {stats_with_locals['num_allocs']} allocs, "
+              f"{stats_with_locals['allocated_bytes']} bytes "
+              f"(+{total_num_allocs} allocs, +{total_allocated_bytes} bytes)")
+
+        # Force garbage collection to free unreachable local tensors
+        gc.collect()
+
+        # Verify that only local tensors were freed, globals remain
+        stats_after_gc = get_allocator_stats()
+        remaining_allocated_bytes = stats_after_gc["allocated_bytes"] - initial_allocated_bytes
+        remaining_num_allocs = stats_after_gc["num_allocs"] - initial_num_allocs
+
+        print(f"[TEST DEBUG] After GC: {stats_after_gc['num_allocs']} allocs, "
+              f"{stats_after_gc['allocated_bytes']} bytes "
+              f"({remaining_num_allocs} allocs, {remaining_allocated_bytes} bytes from baseline)")
+
+        # Check that exactly NUM_GLOBALS allocations remain (the reachable ones)
+        self.assertEqual(
+            remaining_num_allocs,
+            NUM_GLOBALS,
+            f"Expected {NUM_GLOBALS} allocations to remain (globals), got {remaining_num_allocs}. "
+            f"This indicates that {'not all' if remaining_num_allocs > NUM_GLOBALS else 'too many'} "
+            f"unreachable tensors were freed."
+        )
+
+        # Check that allocated bytes match the global tensors only
+        # We expect the bytes to be close to globals_allocated_bytes
+        # (exact match, since FlexAllocator coalesces freed blocks)
+        self.assertEqual(
+            remaining_allocated_bytes,
+            globals_allocated_bytes,
+            f"Expected {globals_allocated_bytes} bytes to remain (globals), got {remaining_allocated_bytes}. "
+            f"Delta: {remaining_allocated_bytes - globals_allocated_bytes} bytes. "
+            f"This indicates a memory leak or that unreachable tensors were not fully freed."
+        )
+
+        # Verify that global tensors are still accessible and valid
+        # We'll verify just one tensor to avoid creating multiple references
+        test_tensor = module_globals["global_tensor_0"]
+        self.assertGreater(
+            test_tensor.data_ptr(),
+            0,
+            "Global tensor should still have valid data pointer after GC"
+        )
+        # Verify we can still use the tensor
+        test_tensor.fill_(42.0)
+        # Create CPU copy in a temporary variable to avoid holding references
+        cpu_copy = test_tensor.cpu()
+        self.assertTrue(
+            torch.all(cpu_copy == 42.0),
+            "Global tensor should still be usable after GC"
+        )
+        # Explicitly delete the CPU copy and test_tensor reference immediately
+        del cpu_copy
+        del test_tensor
+
+        print(f"[TEST RESULT] PASS - GC correctly freed {NUM_LOCALS} unreachable local tensors")
+        print(f"  and preserved {NUM_GLOBALS} reachable global tensors")
+        print(f"  Allocations: {initial_num_allocs} → {stats_with_locals['num_allocs']} → {stats_after_gc['num_allocs']}")
+        print(f"  Bytes: {initial_allocated_bytes} → {stats_with_locals['allocated_bytes']} → {stats_after_gc['allocated_bytes']}")
+
+        # Cleanup: delete global tensors and all intermediate variables
+        # Store keys first to avoid issues with dictionary modification
+        keys_to_delete = list(module_globals.keys())
+        # Delete each tensor from the dictionary
+        for key in keys_to_delete:
+            del module_globals[key]
+        # Delete the keys list and dictionary
+        del keys_to_delete
+        del module_globals
+        # Delete all intermediate stat variables that might hold references
+        del stats_after_globals
+        del globals_allocated_bytes
+        del globals_num_allocs
+        del stats_with_locals
+        del total_allocated_bytes
+        del total_num_allocs
+        del stats_after_gc
+        del remaining_allocated_bytes
+        del remaining_num_allocs
+        # Call gc.collect() multiple times to ensure all cycles are broken
+        # Sometimes Python's GC needs multiple passes to clean up all references
+        gc.collect()
+        gc.collect()
+        gc.collect()
+
+        # Final verification: all memory should be freed
+        final_stats = get_allocator_stats()
+        self.assertEqual(
+            final_stats["allocated_bytes"],
+            initial_allocated_bytes,
+            "All memory should be freed after cleanup"
+        )
+        self.assertEqual(
+            final_stats["num_allocs"],
+            initial_num_allocs,
+            "All allocations should be freed after cleanup"
+        )
+
+        print(f"[TEST DEBUG] After cleanup: {final_stats['num_allocs']} allocs, {final_stats['allocated_bytes']} bytes")
+
+
 if __name__ == "__main__":
     from torch.testing._internal.common_utils import run_tests
 
