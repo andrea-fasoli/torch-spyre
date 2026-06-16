@@ -535,6 +535,120 @@ class TestAllocatorE2E(TestCase):
             "All memory should be freed after test completion"
         )
 
+    def test_gc_many_tensor_release(self):
+        """
+        Garbage Collector release of many tensors
+
+        Allocate K=100 tensors of mixed sizes in a Python list; record allocator
+        free-space before. Drop all references (del lst) and force gc.collect().
+        Verify allocator free-space returns to before (modulo fragmentation) and
+        that the number of live blocks matches the number of still-reachable
+        tensors (zero, in this test).
+
+        This test verifies that Python's garbage collector correctly releases
+        all tensor storage back to FlexAllocator when references are dropped,
+        not just the most recent allocation.
+        """
+        K = 100  # Number of tensors to allocate
+
+        # Mixed sizes: small (1KB), medium (64KB), large (1MB)
+        # Using a pattern that creates variety but is deterministic
+        sizes = []
+        for i in range(K):
+            if i % 10 == 0:
+                # Every 10th tensor is large (1MB = 262144 float32s)
+                sizes.append(262144)
+            elif i % 3 == 0:
+                # Every 3rd tensor (not 10th) is medium (64KB = 16384 float32s)
+                sizes.append(16384)
+            else:
+                # Rest are small (1KB = 256 float32s)
+                sizes.append(256)
+
+        # Record baseline allocator state
+        initial_stats = get_allocator_stats()
+        initial_allocated_bytes = initial_stats["allocated_bytes"]
+        initial_num_allocs = initial_stats["num_allocs"]
+
+        print(f"[TEST DEBUG] Initial state: {initial_num_allocs} allocs, {initial_allocated_bytes} bytes")
+
+        # Allocate K tensors in a list
+        tensor_list = []
+        for i, size in enumerate(sizes):
+            tensor = torch.empty((size,), device="spyre", dtype=torch.float32)
+            self.assertGreater(tensor.data_ptr(), 0, f"Tensor {i} should have valid data pointer")
+            tensor_list.append(tensor)
+
+        # Verify all K tensors were allocated
+        stats_after_alloc = get_allocator_stats()
+        allocated_bytes_delta = stats_after_alloc["allocated_bytes"] - initial_allocated_bytes
+        num_allocs_delta = stats_after_alloc["num_allocs"] - initial_num_allocs
+
+        self.assertEqual(
+            num_allocs_delta,
+            K,
+            f"Expected {K} allocations, got {num_allocs_delta}"
+        )
+        self.assertGreater(
+            allocated_bytes_delta,
+            0,
+            "Total allocated bytes should increase after allocating tensors"
+        )
+
+        # Verify 128-byte alignment
+        self.assertEqual(
+            allocated_bytes_delta % 128,
+            0,
+            f"Allocated bytes ({allocated_bytes_delta}) should be aligned to 128-byte boundary"
+        )
+
+        print(f"[TEST DEBUG] After allocation: {stats_after_alloc['num_allocs']} allocs, "
+              f"{stats_after_alloc['allocated_bytes']} bytes "
+              f"(+{num_allocs_delta} allocs, +{allocated_bytes_delta} bytes)")
+
+        # Drop all references and force garbage collection
+        # Clear the list contents first, then delete the list variable itself
+        # Also delete loop variables that may hold references to the last tensor
+        tensor_list.clear()
+        del tensor_list
+        # Delete loop variables - they exist because we just ran the loop above
+        del tensor
+        gc.collect()
+
+        # Verify all memory was freed
+        stats_after_gc = get_allocator_stats()
+        final_allocated_bytes = stats_after_gc["allocated_bytes"]
+        final_num_allocs = stats_after_gc["num_allocs"]
+
+        print(f"[TEST DEBUG] After GC: {final_num_allocs} allocs, {final_allocated_bytes} bytes")
+
+        # Check that free-space returned to baseline
+        # "modulo fragmentation" means we allow for some internal fragmentation,
+        # but the number of live allocations should be exactly zero
+        self.assertEqual(
+            final_num_allocs,
+            initial_num_allocs,
+            f"Number of live allocations should return to baseline after GC. "
+            f"Expected {initial_num_allocs}, got {final_num_allocs}. "
+            f"This indicates {final_num_allocs - initial_num_allocs} tensors were not freed."
+        )
+
+        # Allocated bytes should also return to baseline
+        # FlexAllocator should not have fragmentation issues that prevent
+        # returning to the exact baseline, since freed blocks are coalesced
+        self.assertEqual(
+            final_allocated_bytes,
+            initial_allocated_bytes,
+            f"Allocated bytes should return to baseline after GC. "
+            f"Expected {initial_allocated_bytes}, got {final_allocated_bytes}. "
+            f"Delta: {final_allocated_bytes - initial_allocated_bytes} bytes. "
+            f"This indicates a memory leak or fragmentation issue."
+        )
+
+        print(f"[TEST RESULT] PASS - All {K} tensors were successfully freed by GC")
+        print(f"  Allocations: {initial_num_allocs} → {stats_after_alloc['num_allocs']} → {final_num_allocs}")
+        print(f"  Bytes: {initial_allocated_bytes} → {stats_after_alloc['allocated_bytes']} → {final_allocated_bytes}")
+
 if __name__ == "__main__":
     from torch.testing._internal.common_utils import run_tests
 
