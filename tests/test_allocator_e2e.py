@@ -556,13 +556,13 @@ class TestAllocatorE2E(TestCase):
         sizes = []
         for i in range(K):
             if i % 10 == 0:
-                # Every 10th tensor is large (1MB = 262144 float32s)
+                # Every 10th tensor is large
                 sizes.append(262144)
             elif i % 3 == 0:
-                # Every 3rd tensor (not 10th) is medium (64KB = 16384 float32s)
+                # Every 3rd tensor (not 10th) is medium
                 sizes.append(16384)
             else:
-                # Rest are small (1KB = 256 float32s)
+                # Rest are small
                 sizes.append(256)
 
         # Record baseline allocator state
@@ -570,12 +570,10 @@ class TestAllocatorE2E(TestCase):
         initial_allocated_bytes = initial_stats["allocated_bytes"]
         initial_num_allocs = initial_stats["num_allocs"]
 
-        print(f"[TEST DEBUG] Initial state: {initial_num_allocs} allocs, {initial_allocated_bytes} bytes")
-
         # Allocate K tensors in a list
         tensor_list = []
         for i, size in enumerate(sizes):
-            tensor = torch.empty((size,), device="spyre", dtype=torch.float32)
+            tensor = torch.empty((size,), device="spyre", dtype=torch.float16)
             self.assertGreater(tensor.data_ptr(), 0, f"Tensor {i} should have valid data pointer")
             tensor_list.append(tensor)
 
@@ -602,10 +600,6 @@ class TestAllocatorE2E(TestCase):
             f"Allocated bytes ({allocated_bytes_delta}) should be aligned to 128-byte boundary"
         )
 
-        print(f"[TEST DEBUG] After allocation: {stats_after_alloc['num_allocs']} allocs, "
-              f"{stats_after_alloc['allocated_bytes']} bytes "
-              f"(+{num_allocs_delta} allocs, +{allocated_bytes_delta} bytes)")
-
         # Drop all references and force garbage collection
         # Clear the list contents first, then delete the list variable itself
         # Also delete loop variables that may hold references to the last tensor
@@ -619,8 +613,6 @@ class TestAllocatorE2E(TestCase):
         stats_after_gc = get_allocator_stats()
         final_allocated_bytes = stats_after_gc["allocated_bytes"]
         final_num_allocs = stats_after_gc["num_allocs"]
-
-        print(f"[TEST DEBUG] After GC: {final_num_allocs} allocs, {final_allocated_bytes} bytes")
 
         # Check that free-space returned to baseline
         # "modulo fragmentation" means we allow for some internal fragmentation,
@@ -645,10 +637,6 @@ class TestAllocatorE2E(TestCase):
             f"This indicates a memory leak or fragmentation issue."
         )
 
-        print(f"[TEST RESULT] PASS - All {K} tensors were successfully freed by GC")
-        print(f"  Allocations: {initial_num_allocs} → {stats_after_alloc['num_allocs']} → {final_num_allocs}")
-        print(f"  Bytes: {initial_allocated_bytes} → {stats_after_alloc['allocated_bytes']} → {final_allocated_bytes}")
-
     def test_gc_mixed_scope_release(self):
         """
         Garbage Collector mixed-scope release
@@ -668,8 +656,6 @@ class TestAllocatorE2E(TestCase):
         initial_allocated_bytes = initial_stats["allocated_bytes"]
         initial_num_allocs = initial_stats["num_allocs"]
 
-        print(f"[TEST DEBUG] Initial state: {initial_num_allocs} allocs, {initial_allocated_bytes} bytes")
-
         # Module-level globals that will remain reachable
         # We'll use a dictionary to simulate module globals
         module_globals = {}
@@ -682,7 +668,7 @@ class TestAllocatorE2E(TestCase):
 
         # Allocate global tensors (these will remain reachable)
         for i in range(NUM_GLOBALS):
-            tensor = torch.empty((GLOBAL_SIZE,), device="spyre", dtype=torch.float32)
+            tensor = torch.empty((GLOBAL_SIZE,), device="spyre", dtype=torch.float16)
             self.assertGreater(tensor.data_ptr(), 0, f"Global tensor {i} should have valid data pointer")
             module_globals[f"global_tensor_{i}"] = tensor
 
@@ -705,16 +691,12 @@ class TestAllocatorE2E(TestCase):
             "Global tensors should allocate memory"
         )
 
-        print(f"[TEST DEBUG] After global allocation: {stats_after_globals['num_allocs']} allocs, "
-              f"{stats_after_globals['allocated_bytes']} bytes "
-              f"(+{globals_num_allocs} allocs, +{globals_allocated_bytes} bytes)")
-
         # Function that allocates local tensors (unreachable after return)
         def allocate_local_tensors():
             """Allocate tensors in function scope that will be unreachable after return."""
             local_tensors = []
             for i in range(NUM_LOCALS):
-                tensor = torch.empty((LOCAL_SIZE,), device="spyre", dtype=torch.float32)
+                tensor = torch.empty((LOCAL_SIZE,), device="spyre", dtype=torch.float16)
                 self.assertGreater(tensor.data_ptr(), 0, f"Local tensor {i} should have valid data pointer")
                 local_tensors.append(tensor)
 
@@ -736,10 +718,6 @@ class TestAllocatorE2E(TestCase):
             f"Expected {NUM_GLOBALS + NUM_LOCALS} total allocations, got {total_num_allocs}"
         )
 
-        print(f"[TEST DEBUG] After local allocation: {stats_with_locals['num_allocs']} allocs, "
-              f"{stats_with_locals['allocated_bytes']} bytes "
-              f"(+{total_num_allocs} allocs, +{total_allocated_bytes} bytes)")
-
         # Force garbage collection to free unreachable local tensors
         gc.collect()
 
@@ -747,10 +725,6 @@ class TestAllocatorE2E(TestCase):
         stats_after_gc = get_allocator_stats()
         remaining_allocated_bytes = stats_after_gc["allocated_bytes"] - initial_allocated_bytes
         remaining_num_allocs = stats_after_gc["num_allocs"] - initial_num_allocs
-
-        print(f"[TEST DEBUG] After GC: {stats_after_gc['num_allocs']} allocs, "
-              f"{stats_after_gc['allocated_bytes']} bytes "
-              f"({remaining_num_allocs} allocs, {remaining_allocated_bytes} bytes from baseline)")
 
         # Check that exactly NUM_GLOBALS allocations remain (the reachable ones)
         self.assertEqual(
@@ -792,13 +766,7 @@ class TestAllocatorE2E(TestCase):
         del cpu_copy
         del test_tensor
 
-        print(f"[TEST RESULT] PASS - GC correctly freed {NUM_LOCALS} unreachable local tensors")
-        print(f"  and preserved {NUM_GLOBALS} reachable global tensors")
-        print(f"  Allocations: {initial_num_allocs} → {stats_with_locals['num_allocs']} → {stats_after_gc['num_allocs']}")
-        print(f"  Bytes: {initial_allocated_bytes} → {stats_with_locals['allocated_bytes']} → {stats_after_gc['allocated_bytes']}")
-
-        # Cleanup: delete global tensors and run GC
-        # Store keys first to avoid issues with dictionary modification
+        # Cleanup: delete global tensors
         keys_to_delete = list(module_globals.keys())
         # Delete each tensor from the dictionary
         for key in keys_to_delete:
@@ -842,14 +810,12 @@ class TestAllocatorE2E(TestCase):
         initial_allocated_bytes = initial_stats["allocated_bytes"]
         initial_num_allocs = initial_stats["num_allocs"]
 
-        print(f"[TEST DEBUG] Initial state: {initial_num_allocs} allocs, {initial_allocated_bytes} bytes")
-
         # Define a simple container class that can participate in reference cycles
         class TensorHolder:
             """Container that holds a tensor and can reference another TensorHolder."""
             def __init__(self, name, tensor_size):
                 self.name = name
-                self.tensor = torch.empty((tensor_size,), device="spyre", dtype=torch.float32)
+                self.tensor = torch.empty((tensor_size,), device="spyre", dtype=torch.float16)
                 self.other = None  # Will hold reference to another TensorHolder
 
             def set_other(self, other):
@@ -890,10 +856,6 @@ class TestAllocatorE2E(TestCase):
             f"Allocated bytes ({allocated_bytes_delta}) should be aligned to 128-byte boundary"
         )
 
-        print(f"[TEST DEBUG] After allocation: {stats_after_alloc['num_allocs']} allocs, "
-              f"{stats_after_alloc['allocated_bytes']} bytes "
-              f"(+{num_allocs_delta} allocs, +{allocated_bytes_delta} bytes)")
-
         # Create the reference cycle: A → B and B → A
         obj_a.set_other(obj_b)
         obj_b.set_other(obj_a)
@@ -902,8 +864,6 @@ class TestAllocatorE2E(TestCase):
         self.assertIs(obj_a.other, obj_b, "Object A should reference object B")
         self.assertIs(obj_b.other, obj_a, "Object B should reference object A")
         self.assertIs(obj_a.other.other, obj_a, "Cycle should be complete: A → B → A")
-
-        print(f"[TEST DEBUG] Reference cycle created: A ↔ B")
 
         # Delete external handles to the cycle
         # After this, the only references to obj_a and obj_b are within the cycle itself
@@ -918,14 +878,10 @@ class TestAllocatorE2E(TestCase):
         # gc.collect() returns the number of objects collected
         collected = gc.collect()
 
-        print(f"[TEST DEBUG] gc.collect() collected {collected} objects")
-
         # Verify that both tensors' storage was released
         stats_after_gc = get_allocator_stats()
         final_allocated_bytes = stats_after_gc["allocated_bytes"]
         final_num_allocs = stats_after_gc["num_allocs"]
-
-        print(f"[TEST DEBUG] After GC: {final_num_allocs} allocs, {final_allocated_bytes} bytes")
 
         # Check that all allocations were freed (cycle was broken)
         self.assertEqual(
@@ -956,12 +912,6 @@ class TestAllocatorE2E(TestCase):
             "If this is 0, the cycle may not have been created properly."
         )
 
-        print(f"[TEST RESULT] PASS - Cycle collector successfully broke the reference cycle")
-        print(f"  and freed both tensors' storage")
-        print(f"  Collected {collected} objects")
-        print(f"  Allocations: {initial_num_allocs} → {stats_after_alloc['num_allocs']} → {final_num_allocs}")
-        print(f"  Bytes: {initial_allocated_bytes} → {stats_after_alloc['allocated_bytes']} → {final_allocated_bytes}")
-
     def test_gc_repeated_reuse_churn(self):
         """
         Garbage Collector repeated reuse churn
@@ -989,9 +939,6 @@ class TestAllocatorE2E(TestCase):
         initial_allocated_bytes = initial_stats["allocated_bytes"]
         initial_num_allocs = initial_stats["num_allocs"]
 
-        print(f"[TEST DEBUG] Initial state: {initial_num_allocs} allocs, {initial_allocated_bytes} bytes")
-        print(f"[TEST DEBUG] Running {T} iterations of allocate-write-drop-GC-allocate cycle")
-
         # Track sentinels used - only store sentinels we'll check against
         # Use a set for O(1) lookup instead of list for O(n) iteration
         sentinels_to_check = set()
@@ -1006,7 +953,7 @@ class TestAllocatorE2E(TestCase):
             sentinel = float(iteration + 1000)
 
             # Step 1: Allocate tensor
-            tensor = torch.empty((TENSOR_SIZE,), device="spyre", dtype=torch.float32)
+            tensor = torch.empty((TENSOR_SIZE,), device="spyre", dtype=torch.float16)
 
             # Step 2: Write sentinel value
             tensor.fill_(sentinel)
@@ -1026,7 +973,7 @@ class TestAllocatorE2E(TestCase):
                 allocs_samples.append(stats["num_allocs"])
 
             # Step 5: Allocate another tensor (will likely reuse the freed storage)
-            tensor2 = torch.empty((TENSOR_SIZE,), device="spyre", dtype=torch.float32)
+            tensor2 = torch.empty((TENSOR_SIZE,), device="spyre", dtype=torch.float16)
 
             # CRITICAL CHECK: Verify no stale sentinel from prior iterations
             # Only check periodically to reduce CPU transfer overhead
@@ -1057,10 +1004,6 @@ class TestAllocatorE2E(TestCase):
             # Clean up for next iteration
             del tensor2
 
-            # Periodic progress report
-            if (iteration + 1) % 200 == 0:
-                print(f"[TEST DEBUG] Completed {iteration + 1}/{T} iterations")
-
         # Final GC to clean up any remaining allocations
         gc.collect()
 
@@ -1068,8 +1011,6 @@ class TestAllocatorE2E(TestCase):
         final_stats = get_allocator_stats()
         final_allocated_bytes = final_stats["allocated_bytes"]
         final_num_allocs = final_stats["num_allocs"]
-
-        print(f"[TEST DEBUG] After {T} iterations: {final_num_allocs} allocs, {final_allocated_bytes} bytes")
 
         # Verify allocator state returned to baseline (no leak)
         self.assertEqual(
@@ -1109,12 +1050,6 @@ class TestAllocatorE2E(TestCase):
             f"Found {len(unique_allocs)} different allocation counts: {unique_allocs}. "
             f"This indicates inconsistent memory management."
         )
-
-        print(f"[TEST RESULT] PASS - Completed {T} iterations with no residual data leakage and no memory leak")
-        print(f"  Checked for stale sentinels every {CHECK_INTERVAL} iterations")
-        print(f"  Allocator free-space remained steady (sampled every {sample_interval} iterations)")
-        print(f"  Final state: {final_num_allocs} allocs, {final_allocated_bytes} bytes")
-
 
     def test_gc_multithreaded_churn(self):
         """
@@ -1177,7 +1112,7 @@ class TestAllocatorE2E(TestCase):
                     sentinel = float(sentinel_base + iteration)
 
                     # Step 1: Allocate tensor
-                    tensor = torch.empty((TENSOR_SIZE,), device="spyre", dtype=torch.float32)
+                    tensor = torch.empty((TENSOR_SIZE,), device="spyre", dtype=torch.float16)
 
                     # Step 2: Write thread-local sentinel
                     tensor.fill_(sentinel)
@@ -1192,7 +1127,7 @@ class TestAllocatorE2E(TestCase):
                     # Step 5: Allocate another tensor (will likely reuse freed storage)
                     # Note: This tensor may contain residual data from this thread or other threads.
                     # This is expected behavior matching CPU allocator semantics (no zeroing on reuse).
-                    tensor2 = torch.empty((TENSOR_SIZE,), device="spyre", dtype=torch.float32)
+                    tensor2 = torch.empty((TENSOR_SIZE,), device="spyre", dtype=torch.float16)
 
                     # Clean up for next iteration
                     del tensor2
