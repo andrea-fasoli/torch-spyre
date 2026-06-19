@@ -688,7 +688,6 @@ class TestAllocatorE2E(TestCase):
 
         # Delete loop variables to avoid holding extra references
         del tensor
-        del i
 
         # Verify global tensors were allocated
         stats_after_globals = get_allocator_stats()
@@ -798,29 +797,14 @@ class TestAllocatorE2E(TestCase):
         print(f"  Allocations: {initial_num_allocs} → {stats_with_locals['num_allocs']} → {stats_after_gc['num_allocs']}")
         print(f"  Bytes: {initial_allocated_bytes} → {stats_with_locals['allocated_bytes']} → {stats_after_gc['allocated_bytes']}")
 
-        # Cleanup: delete global tensors and all intermediate variables
+        # Cleanup: delete global tensors and run GC
         # Store keys first to avoid issues with dictionary modification
         keys_to_delete = list(module_globals.keys())
         # Delete each tensor from the dictionary
         for key in keys_to_delete:
             del module_globals[key]
-        # Delete the keys list and dictionary
-        del keys_to_delete
-        del module_globals
-        # Delete all intermediate stat variables that might hold references
-        del stats_after_globals
-        del globals_allocated_bytes
-        del globals_num_allocs
-        del stats_with_locals
-        del total_allocated_bytes
-        del total_num_allocs
-        del stats_after_gc
-        del remaining_allocated_bytes
-        del remaining_num_allocs
-        # Call gc.collect() multiple times to ensure all cycles are broken
-        # Sometimes Python's GC needs multiple passes to clean up all references
-        gc.collect()
-        gc.collect()
+
+        # Force garbage collection for remaining tensors
         gc.collect()
 
         # Final verification: all memory should be freed
@@ -837,6 +821,7 @@ class TestAllocatorE2E(TestCase):
         )
 
         print(f"[TEST DEBUG] After cleanup: {final_stats['num_allocs']} allocs, {final_stats['allocated_bytes']} bytes")
+
     def test_gc_cyclic_references(self):
         """
         Garbage Collector cyclic reference handling
