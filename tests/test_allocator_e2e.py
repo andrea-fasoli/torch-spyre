@@ -396,175 +396,32 @@ class TestAllocatorE2E(TestCase):
            - Retry up to 5 times if CPU doesn't reuse the pointer
         2. Test Spyre: allocate, fill with sentinel, free, reallocate
         3. Verify Spyre behavior matches CPU behavior
+
+        Critical note: testing residual-data semantics requires a reliable way to
+        compare Flex device-block addresses across two allocations, which is not
+        exposed by tensor.data_ptr() (that returns the CPU-heap address of the
+        SharedOwnerCtx, not the Flex device address). To revisit.
+
+        Critical note: CPU does not generally zeros allocations, so this test would
+        be a no-op. Skipped for now.
+
         """
-        N = 1024  # test tensor size
-        MAX_CPU_REUSE_ATTEMPTS = 5
+        self.skipTest("not yet implemented")
 
-        # Sentinel pattern: using a distinctive value that's unlikely to appear randomly
-        sentinel_value = -31744.0  # 0xF800 in float16 (large negative)
-
-        initial_stats = get_allocator_stats()
-
-        # ===== PHASE 1: Establish CPU allocator baseline behavior =====
-        # CPU sometimes doesn't reuse memory, so we retry until it does
-        cpu_reused = False
-        cpu_is_zeroed = False
-        cpu_has_sentinel = False
-
-        for attempt in range(MAX_CPU_REUSE_ATTEMPTS):
-            # Allocate on CPU, fill with sentinel, delete, reallocate
-            cpu_t1 = torch.empty((N,), device="cpu", dtype=torch.float16)
-            cpu_t1.fill_(sentinel_value)
-            cpu_t1_ptr = cpu_t1.data_ptr()
-            del cpu_t1
-            gc.collect()
-
-            cpu_t2 = torch.empty((N,), device="cpu", dtype=torch.float16)
-            cpu_t2_ptr = cpu_t2.data_ptr()
-
-            # Check if CPU reused memory
-            if cpu_t2_ptr == cpu_t1_ptr:
-                cpu_reused = True
-                cpu_is_zeroed = torch.all(cpu_t2 == 0.0).item()
-                cpu_has_sentinel = torch.any(cpu_t2 == sentinel_value).item()
-                del cpu_t2
-                gc.collect()
-                print(
-                    f"[TEST DEBUG] CPU reused memory on attempt {attempt + 1}/{MAX_CPU_REUSE_ATTEMPTS}"
-                )
-                print(
-                    f"  CPU baseline: reused=True, zeroed={cpu_is_zeroed}, has_sentinel={cpu_has_sentinel}"
-                )
-                break
-            else:
-                # CPU didn't reuse, try again
-                del cpu_t2
-                gc.collect()
-
-        if not cpu_reused:
-            # After MAX_CPU_REUSE_ATTEMPTS, CPU still didn't reuse memory
-            # This is acceptable CPU behavior, but we can't establish a baseline
-            # Skip the test with a clear message
-            self.skipTest(
-                f"CPU allocator did not reuse memory after {MAX_CPU_REUSE_ATTEMPTS} attempts. "
-                f"Cannot establish baseline for comparison. This is normal CPU behavior."
-            )
-
-        # ===== PHASE 2: Test Spyre allocator =====
-        # Step 1: Allocate t1 and fill with sentinel
-        t1 = torch.empty((N,), dtype=torch.float16, device="spyre")
-        t1.fill_(sentinel_value)
-
-        # Verify sentinel was written (transfer to CPU for verification)
-        t1_cpu = t1.cpu()
-        self.assertTrue(
-            torch.all(t1_cpu == sentinel_value),
-            "Sentinel pattern should be written to t1",
-        )
-
-        # Step 2: Record t1's data pointer
-        t1_ptr = t1.data_ptr()
-        self.assertGreater(t1_ptr, 0, "t1 should have valid data pointer")
-
-        # Step 3: Delete t1 and force GC
-        del t1
-        del t1_cpu
-        gc.collect()
-
-        # Verify t1 was deallocated
-        stats_after_gc = get_allocator_stats()
-        self.assertEqual(
-            stats_after_gc["allocated_bytes"],
-            initial_stats["allocated_bytes"],
-            "Memory should be freed after t1 deletion and GC",
-        )
-
-        # Step 4: Allocate t2 of same size and verify reuse
-        t2 = torch.empty((N,), device="spyre", dtype=torch.float16)
-        t2_ptr = t2.data_ptr()
-        self.assertGreater(t2_ptr, 0, "t2 should have valid data pointer")
-
-        # Verify memory was reused (same pointer)
-        self.assertEqual(
-            t2_ptr,
-            t1_ptr,
-            f"Expected memory reuse: t2 should have same pointer as t1. "
-            f"t1_ptr={hex(t1_ptr)}, t2_ptr={hex(t2_ptr)}",
-        )
-
-        # ===== PHASE 3: Verify Spyre behavior matches CPU baseline =====
-        # Transfer to CPU for verification
-        t2_cpu = t2.cpu()
-
-        spyre_is_zeroed = torch.all(t2_cpu == 0.0).item()
-        spyre_has_sentinel = torch.any(t2_cpu == sentinel_value).item()
-
-        print(
-            f"[TEST DEBUG] Spyre behavior: zeroed={spyre_is_zeroed}, has_sentinel={spyre_has_sentinel}"
-        )
-        print(
-            f"[TEST DEBUG] CPU baseline: zeroed={cpu_is_zeroed}, has_sentinel={cpu_has_sentinel}"
-        )
-
-        # Policy: Spyre must match CPU behavior
-        # Since CPU currently leaks data (cpu_has_sentinel=True, cpu_is_zeroed=False),
-        # Spyre is allowed to leak data as well. The test passes as long as behavior is consistent.
-
-        if cpu_has_sentinel:
-            # CPU leaks sentinel data, so Spyre is allowed to leak as well
-            # This is the expected current behavior for both allocators
-            print(
-                "[TEST RESULT] PASS - Both CPU and Spyre leak residual data (expected behavior)"
-            )
-            print(
-                "  Note: Neither allocator zeros memory on reuse. This is acceptable."
-            )
-        elif cpu_is_zeroed:
-            # CPU zeros memory, so Spyre should also zero memory
-            self.assertTrue(
-                spyre_is_zeroed,
-                f"CPU allocator zeros memory on reuse, but Spyre does not. "
-                f"Spyre must match CPU behavior. "
-                f"CPU: zeroed={cpu_is_zeroed}, Spyre: zeroed={spyre_is_zeroed}",
-            )
-            print("[TEST RESULT] PASS - Both CPU and Spyre zero memory on reuse")
-        else:
-            # CPU behavior is undefined (neither zeroed nor has sentinel)
-            # This shouldn't happen, but if it does, just document it
-            print(
-                "[TEST RESULT] PASS - CPU behavior is undefined, Spyre behavior documented"
-            )
-            print(f"  CPU: zeroed={cpu_is_zeroed}, has_sentinel={cpu_has_sentinel}")
-            print(
-                f"  Spyre: zeroed={spyre_is_zeroed}, has_sentinel={spyre_has_sentinel}"
-            )
-
-        # Cleanup
-        del t2
-        del t2_cpu
-        gc.collect()
-
-        # Final verification: no memory leak
-        final_stats = get_allocator_stats()
-        self.assertEqual(
-            final_stats["allocated_bytes"],
-            initial_stats["allocated_bytes"],
-            "All memory should be freed after test completion",
-        )
 
     def test_gc_many_tensor_release(self):
         """
-        Garbage Collector release of many tensors
+        Bulk tensor release via reference counting.
 
         Allocate K=100 tensors of mixed sizes in a Python list; record allocator
-        free-space before. Drop all references (del lst) and force gc.collect().
-        Verify allocator free-space returns to before (modulo fragmentation) and
-        that the number of live blocks matches the number of still-reachable
-        tensors (zero, in this test).
+        state before. Drop all references and verify allocator free-space returns
+        to the pre-allocation baseline.
 
-        This test verifies that Python's garbage collector correctly releases
-        all tensor storage back to FlexAllocator when references are dropped,
-        not just the most recent allocation.
+        Note: these tensors are non-cyclic, so CPython's reference counting drives
+        deallocation immediately when the list is cleared — gc.collect() is called
+        as a precaution but is a no-op for these objects. The test verifies that
+        every tensor's ReportAndDelete callback fires and all K allocations are
+        accounted for, not just the most recent one.
         """
         K = 100  # Number of tensors to allocate
 
@@ -619,13 +476,17 @@ class TestAllocatorE2E(TestCase):
             f"Allocated bytes ({allocated_bytes_delta}) should be aligned to 128-byte boundary",
         )
 
-        # Drop all references and force garbage collection
-        # Clear the list contents first, then delete the list variable itself
-        # Also delete loop variables that may hold references to the last tensor
+        # Drop all references. tensor_list.clear() drops every element's refcount
+        # to zero immediately (non-cyclic objects), triggering ReportAndDelete for
+        # each. The loop variable 'tensor' holds an extra reference to the last
+        # element; release it first so that clear() is the final drop for every
+        # element uniformly.
+        try:
+            del tensor
+        except NameError:
+            pass
         tensor_list.clear()
         del tensor_list
-        # Delete loop variables - they exist because we just ran the loop above
-        del tensor
         gc.collect()
 
         # Verify all memory was freed
