@@ -385,38 +385,6 @@ class TestAllocatorE2E(TestCase):
             final_stats["allocated_bytes"], initial_stats["allocated_bytes"]
         )
 
-    def test_gc_residual_data_on_reuse(self):
-        """
-        Garbage Collector-driven residual data on reuse
-
-        Verify that when a freed block is reused for a new tensor, residual data
-        from the previous tensor is handled consistently with CPU allocator semantics.
-
-        This test ensures FlexAllocator matches CPU allocator behavior:
-        - If CPU reuses memory and leaks data, FlexAllocator may also leak data
-        - If CPU zeros memory, FlexAllocator should also zero memory
-        - The key is consistency, not a specific zeroing policy
-
-        Note: FlexAllocator itself does not zero memory (that's hardware/firmware
-        responsibility). This test verifies that the overall behavior matches CPU.
-
-        Steps:
-        1. Establish CPU baseline: allocate, fill with sentinel, free, reallocate
-           - Retry up to 5 times if CPU doesn't reuse the pointer
-        2. Test Spyre: allocate, fill with sentinel, free, reallocate
-        3. Verify Spyre behavior matches CPU behavior
-
-        Critical note: testing residual-data semantics requires a reliable way to
-        compare Flex device-block addresses across two allocations, which is not
-        exposed by tensor.data_ptr() (that returns the CPU-heap address of the
-        SharedOwnerCtx, not the Flex device address). To revisit.
-
-        Critical note: CPU does not generally zeros allocations, so this test would
-        be a no-op. Skipped for now.
-
-        """
-        self.skipTest("not yet implemented")
-
     def test_gc_many_tensor_release(self):
         """
         Bulk tensor release via reference counting.
