@@ -754,27 +754,32 @@ class TestAllocatorE2E(TestCase):
             f"Allocated bytes ({allocated_bytes_delta}) should be aligned to 128-byte boundary",
         )
 
-        # Create the reference cycle: A → B and B → A
-        obj_a.set_other(obj_b)
-        obj_b.set_other(obj_a)
+        # Disable automatic GC so the interpreter's threshold-triggered collection
+        # cannot break the cycle before our explicit gc.collect() call below.
+        # This ensures collected reflects exactly our cycle, not background activity.
+        gc.disable()
+        try:
+            # Create the reference cycle: A → B and B → A
+            obj_a.set_other(obj_b)
+            obj_b.set_other(obj_a)
 
-        # Verify the cycle exists
-        self.assertIs(obj_a.other, obj_b, "Object A should reference object B")
-        self.assertIs(obj_b.other, obj_a, "Object B should reference object A")
-        self.assertIs(obj_a.other.other, obj_a, "Cycle should be complete: A → B → A")
+            # Verify the cycle exists
+            self.assertIs(obj_a.other, obj_b, "Object A should reference object B")
+            self.assertIs(obj_b.other, obj_a, "Object B should reference object A")
+            self.assertIs(obj_a.other.other, obj_a, "Cycle should be complete: A → B → A")
 
-        # Delete external handles to the cycle
-        # After this, the only references to obj_a and obj_b are within the cycle itself
-        del obj_a
-        del obj_b
+            # Delete external handles to the cycle.
+            # After this, the only references to obj_a and obj_b are within the
+            # cycle itself — refcounts are non-zero, so only the cycle collector
+            # can break this.
+            del obj_a
+            del obj_b
 
-        # At this point, the cycle is unreachable from external code
-        # but the objects still reference each other, so refcount > 0
-        # Only Python's cycle collector can break this
-
-        # Force garbage collection to invoke the cycle collector
-        # gc.collect() returns the number of objects collected
-        collected = gc.collect()
+            # Invoke the cycle collector explicitly.
+            # gc.collect() returns the number of unreachable objects collected.
+            collected = gc.collect()
+        finally:
+            gc.enable()
 
         # Verify that both tensors' storage was released
         stats_after_gc = get_allocator_stats()
@@ -800,14 +805,15 @@ class TestAllocatorE2E(TestCase):
             f"This indicates the cycle was not fully broken or there is a memory leak.",
         )
 
-        # Verify that the cycle collector actually did work
-        # If collected == 0, it might mean the cycle wasn't created properly
-        # or was already collected by refcounting (which shouldn't happen for cycles)
-        self.assertGreater(
+        # The cycle comprises two TensorHolder objects, so the collector must have
+        # found at least 2 unreachable objects. A return value of 0 means the cycle
+        # was collected before our gc.collect() (impossible with gc.disable() above);
+        # a value of 1 would mean only one side of the cycle was collected.
+        self.assertGreaterEqual(
             collected,
-            0,
-            "gc.collect() should have collected objects from the cycle. "
-            "If this is 0, the cycle may not have been created properly.",
+            2,
+            f"gc.collect() should have collected at least 2 objects (both TensorHolders). "
+            f"Got {collected}.",
         )
 
     def test_gc_repeated_reuse_churn(self):
