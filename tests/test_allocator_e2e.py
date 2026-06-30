@@ -23,7 +23,6 @@ allocate/free cycles leave the allocator in a consistent state.
 import gc
 import collections
 import threading
-import time
 import torch
 import random
 
@@ -418,7 +417,6 @@ class TestAllocatorE2E(TestCase):
         """
         self.skipTest("not yet implemented")
 
-
     def test_gc_many_tensor_release(self):
         """
         Bulk tensor release via reference counting.
@@ -776,7 +774,9 @@ class TestAllocatorE2E(TestCase):
             # Verify the cycle exists
             self.assertIs(obj_a.other, obj_b, "Object A should reference object B")
             self.assertIs(obj_b.other, obj_a, "Object B should reference object A")
-            self.assertIs(obj_a.other.other, obj_a, "Cycle should be complete: A → B → A")
+            self.assertIs(
+                obj_a.other.other, obj_a, "Cycle should be complete: A → B → A"
+            )
 
             # Delete external handles to the cycle.
             # After this, the only references to obj_a and obj_b are within the

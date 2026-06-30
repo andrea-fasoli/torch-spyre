@@ -85,19 +85,18 @@ void SpyreAllocator::recordAlloc(size_t nbytes, void* data, int device_id) {
           stats_.allocation[stat_type].increase(1);
           stats_.allocated_bytes[stat_type].increase(nbytes);
         });
-    total_allocated =
-        stats_
-            .allocated_bytes[static_cast<size_t>(
-                c10::CachingAllocator::StatType::AGGREGATE)]
-            .current;
+    total_allocated = stats_
+                          .allocated_bytes[static_cast<size_t>(
+                              c10::CachingAllocator::StatType::AGGREGATE)]
+                          .current;
   }
   c10::Device curr_device =
       c10::Device(c10::DeviceType::PrivateUse1, device_id);
   c10::reportMemoryUsageToProfiler(
       data,
-      nbytes,          // alloc_size
-      total_allocated, // total_allocated
-      total_allocated, // total_reserved (currently same as total_allocated)
+      nbytes,           // alloc_size
+      total_allocated,  // total_allocated
+      total_allocated,  // total_reserved (currently same as total_allocated)
       curr_device);
 }
 
@@ -110,19 +109,18 @@ void SpyreAllocator::recordRelease(size_t nbytes, void* data, int device_id) {
           stats_.allocation[stat_type].decrease(1);
           stats_.allocated_bytes[stat_type].decrease(nbytes);
         });
-    total_allocated =
-        stats_
-            .allocated_bytes[static_cast<size_t>(
-                c10::CachingAllocator::StatType::AGGREGATE)]
-            .current;
+    total_allocated = stats_
+                          .allocated_bytes[static_cast<size_t>(
+                              c10::CachingAllocator::StatType::AGGREGATE)]
+                          .current;
   }
   c10::Device curr_device =
       c10::Device(c10::DeviceType::PrivateUse1, device_id);
   c10::reportMemoryUsageToProfiler(
       data,
-      -static_cast<int64_t>(nbytes), // alloc_size
+      -static_cast<int64_t>(nbytes),  // alloc_size
       total_allocated,                // total_allocated
-      total_allocated,                // total_reserved (currently same as total_allocated)
+      total_allocated,  // total_reserved (currently same as total_allocated)
       curr_device);
 }
 
