@@ -21,6 +21,7 @@ allocate/free cycles leave the allocator in a consistent state.
 """
 
 import gc
+import collections
 import torch
 import random
 
@@ -836,20 +837,22 @@ class TestAllocatorE2E(TestCase):
         """
         T = 1000  # Number of iterations (acceptance criteria: T ≥ 1000)
         TENSOR_SIZE = 2048  # 8KB per tensor
-        CHECK_INTERVAL = (
-            50  # Check for stale sentinels every N iterations (optimization)
-        )
+        CHECK_INTERVAL = 50  # Check for stale sentinels every N iterations
 
         # Record baseline allocator state
         initial_stats = get_allocator_stats()
         initial_allocated_bytes = initial_stats["allocated_bytes"]
         initial_num_allocs = initial_stats["num_allocs"]
 
-        # Track sentinels used - only store sentinels we'll check against
-        # Use a set for O(1) lookup instead of list for O(n) iteration
-        sentinels_to_check = set()
+        # Rolling window of the last 100 sentinels written to freed tensors.
+        # deque(maxlen=100) gives O(1) FIFO eviction, unlike set.pop() which is
+        # arbitrary. The current iteration's sentinel is added after tensor2 is
+        # checked, so it is never tested against itself.
+        past_sentinels: collections.deque = collections.deque(maxlen=100)
 
-        # Sample allocator state periodically instead of every iteration
+        # Samples taken while exactly one tensor (tensor2) is alive, giving a
+        # meaningful steady-state signal: each sample should equal
+        # initial_allocated_bytes + one aligned allocation.
         bytes_samples = []
         allocs_samples = []
         sample_interval = 100
@@ -867,45 +870,39 @@ class TestAllocatorE2E(TestCase):
             # Step 3: Drop the tensor
             del tensor
 
-            # Step 4: Force GC (but less frequently for speed)
-            # GC every iteration is expensive; batch GC calls
+            # Step 4: Force GC periodically (non-cyclic, so refcounting already
+            # freed the tensor above; this is a hygiene call)
             if iteration % 10 == 0:
                 gc.collect()
 
-            # Sample allocator state periodically
+            # Step 5: Allocate another tensor (will reuse the freed block)
+            tensor2 = torch.empty((TENSOR_SIZE,), device="spyre", dtype=torch.float16)
+
+            # Sample allocator state while tensor2 is alive (one allocation live).
+            # Sampling here, not before the alloc, gives a non-trivial signal.
             if iteration % sample_interval == 0:
                 stats = get_allocator_stats()
                 bytes_samples.append(stats["allocated_bytes"])
                 allocs_samples.append(stats["num_allocs"])
 
-            # Step 5: Allocate another tensor (will likely reuse the freed storage)
-            tensor2 = torch.empty((TENSOR_SIZE,), device="spyre", dtype=torch.float16)
-
-            # CRITICAL CHECK: Verify no stale sentinel from prior iterations
-            # Only check periodically to reduce CPU transfer overhead
-            if iteration % CHECK_INTERVAL == 0 and iteration > 0:
-                # Transfer to CPU for verification
+            # CRITICAL CHECK: verify tensor2 contains no sentinel from a prior
+            # iteration. Only check periodically to reduce CPU-transfer overhead.
+            # past_sentinels is populated at the end of this block, so it always
+            # contains sentinels from strictly earlier iterations — never the
+            # current one.
+            if iteration % CHECK_INTERVAL == 0 and len(past_sentinels) > 0:
                 tensor2_cpu = tensor2.cpu()
-
-                # Check if any tracked sentinel values appear in the new tensor
-                # Use vectorized operation instead of loop
-                for prev_sentinel in sentinels_to_check:
-                    has_stale_sentinel = torch.any(tensor2_cpu == prev_sentinel).item()
-                    if has_stale_sentinel:
+                for prev_sentinel in past_sentinels:
+                    if torch.any(tensor2_cpu == prev_sentinel).item():
                         self.fail(
-                            f"Iteration {iteration}: Found stale sentinel {prev_sentinel} "
-                            f"in newly allocated tensor. This indicates residual data from a prior iteration leaked "
-                            f"into the current iteration's storage."
+                            f"Iteration {iteration}: stale sentinel {prev_sentinel} "
+                            f"found in newly allocated tensor — residual data leaked "
+                            f"from a prior iteration's storage."
                         )
-
                 del tensor2_cpu
 
-                # Add current sentinel to tracking set
-                sentinels_to_check.add(sentinel)
-
-                # Limit set size to prevent memory growth (keep last 100 sentinels)
-                if len(sentinels_to_check) > 100:
-                    sentinels_to_check.pop()
+            # Record this iteration's sentinel for future checks
+            past_sentinels.append(sentinel)
 
             # Clean up for next iteration
             del tensor2
@@ -913,18 +910,17 @@ class TestAllocatorE2E(TestCase):
         # Final GC to clean up any remaining allocations
         gc.collect()
 
-        # Final verification: Check for memory leaks
+        # Final verification: no memory leak
         final_stats = get_allocator_stats()
         final_allocated_bytes = final_stats["allocated_bytes"]
         final_num_allocs = final_stats["num_allocs"]
 
-        # Verify allocator state returned to baseline (no leak)
         self.assertEqual(
             final_num_allocs,
             initial_num_allocs,
             f"Number of allocations should return to baseline after {T} iterations. "
             f"Expected {initial_num_allocs}, got {final_num_allocs}. "
-            f"This indicates a memory leak of {final_num_allocs - initial_num_allocs} allocations.",
+            f"Leak: {final_num_allocs - initial_num_allocs} allocations.",
         )
 
         self.assertEqual(
@@ -932,29 +928,22 @@ class TestAllocatorE2E(TestCase):
             initial_allocated_bytes,
             f"Allocated bytes should return to baseline after {T} iterations. "
             f"Expected {initial_allocated_bytes}, got {final_allocated_bytes}. "
-            f"Delta: {final_allocated_bytes - initial_allocated_bytes} bytes. "
-            f"This indicates a memory leak.",
+            f"Delta: {final_allocated_bytes - initial_allocated_bytes} bytes.",
         )
 
-        # Verify allocator free-space remained steady throughout sampled iterations
-        # Check that bytes_samples doesn't show a growing trend
-        unique_bytes = set(bytes_samples)
-        self.assertLessEqual(
-            len(unique_bytes),
-            2,  # Allow for minor variation due to sampling timing
-            f"Allocator free-space should be steady across sampled iterations. "
-            f"Found {len(unique_bytes)} different byte values: {unique_bytes}. "
-            f"This indicates inconsistent memory management or fragmentation.",
+        # Each sample was taken with exactly one tensor2 alive, so every sample
+        # should show exactly one allocation above the baseline. Any variation
+        # indicates a leak or double-count in the allocator's stats.
+        expected_bytes_with_one_alloc = bytes_samples[0]
+        self.assertTrue(
+            all(b == expected_bytes_with_one_alloc for b in bytes_samples),
+            f"Allocated bytes should be constant across sampled iterations "
+            f"(one live tensor each time). Got: {bytes_samples}",
         )
-
-        # Similarly for allocation count
-        unique_allocs = set(allocs_samples)
-        self.assertLessEqual(
-            len(unique_allocs),
-            2,  # Allow for minor variation
-            f"Allocation count should be steady across sampled iterations. "
-            f"Found {len(unique_allocs)} different allocation counts: {unique_allocs}. "
-            f"This indicates inconsistent memory management.",
+        self.assertTrue(
+            all(a == allocs_samples[0] for a in allocs_samples),
+            f"Allocation count should be constant across sampled iterations "
+            f"(one live tensor each time). Got: {allocs_samples}",
         )
 
     def test_gc_multithreaded_churn(self):
