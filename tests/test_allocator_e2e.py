@@ -22,6 +22,8 @@ allocate/free cycles leave the allocator in a consistent state.
 
 import gc
 import collections
+import threading
+import time
 import torch
 import random
 
@@ -46,13 +48,20 @@ class TestAllocatorE2E(TestCase):
     def setUp(self):
         """Reset allocator stats before each test."""
         super().setUp()
-        # Force garbage collection to ensure clean state
+        # Two gc.collect() passes: the first breaks cycles and drops refcounts,
+        # the second collects any objects whose __del__ was queued by the first
+        # pass. This ensures all ReportAndDelete calls from the previous test
+        # have fired before we reset stats and snapshot the baseline.
+        gc.collect()
         gc.collect()
         # Ensure torch.spyre is initialized
         if not torch.spyre.is_initialized():
             torch.spyre._lazy_init()
         torch.spyre._spyre_reset_accumulated_stats(0)
         torch.spyre._spyre_reset_peak_stats(0)
+        # Snapshot baseline immediately after reset so no intervening
+        # ReportAndDelete call can produce a negative delta in the test body.
+        self.initial_stats = get_allocator_stats()
 
     def tearDown(self):
         """Clean up after each test."""
@@ -68,7 +77,7 @@ class TestAllocatorE2E(TestCase):
         N = 1024
 
         # Get initial stats
-        initial_stats = get_allocator_stats()
+        initial_stats = self.initial_stats
 
         # Allocate tensor
         tensor = torch.empty((N,), device="spyre", dtype=torch.float32)
@@ -111,7 +120,7 @@ class TestAllocatorE2E(TestCase):
         N = 2048
 
         # Get initial stats
-        initial_stats = get_allocator_stats()
+        initial_stats = self.initial_stats
 
         # Allocate tensor in a scope
         tensor = torch.empty((N,), device="spyre", dtype=torch.float32)
@@ -167,7 +176,7 @@ class TestAllocatorE2E(TestCase):
         batch_size = 10
         large_size = small_size * batch_size
 
-        initial_stats = get_allocator_stats()
+        initial_stats = self.initial_stats
 
         # Allocate 100 small tensors
         tensors = []
@@ -289,7 +298,7 @@ class TestAllocatorE2E(TestCase):
             524288,  # very large: 2 MB
         ]
 
-        initial_stats = get_allocator_stats()
+        initial_stats = self.initial_stats
 
         # Allocate all tensors
         tensors = []
@@ -344,7 +353,7 @@ class TestAllocatorE2E(TestCase):
         Verify that torch.empty((0,), device="spyre") does not crash
         and behavior matches CPU allocator semantics.
         """
-        initial_stats = get_allocator_stats()
+        initial_stats = self.initial_stats
 
         # Allocate zero-size tensor
         tensor = torch.empty((0,), device="spyre", dtype=torch.float32)
@@ -441,7 +450,7 @@ class TestAllocatorE2E(TestCase):
                 sizes.append(256)
 
         # Record baseline allocator state
-        initial_stats = get_allocator_stats()
+        initial_stats = self.initial_stats
         initial_allocated_bytes = initial_stats["allocated_bytes"]
         initial_num_allocs = initial_stats["num_allocs"]
 
@@ -536,7 +545,7 @@ class TestAllocatorE2E(TestCase):
         are removed from the allocator's accounting.
         """
         # Record baseline allocator state
-        initial_stats = get_allocator_stats()
+        initial_stats = self.initial_stats
         initial_allocated_bytes = initial_stats["allocated_bytes"]
         initial_num_allocs = initial_stats["num_allocs"]
 
@@ -694,7 +703,7 @@ class TestAllocatorE2E(TestCase):
         when circular references exist.
         """
         # Record baseline allocator state
-        initial_stats = get_allocator_stats()
+        initial_stats = self.initial_stats
         initial_allocated_bytes = initial_stats["allocated_bytes"]
         initial_num_allocs = initial_stats["num_allocs"]
 
@@ -840,7 +849,7 @@ class TestAllocatorE2E(TestCase):
         CHECK_INTERVAL = 50  # Check for stale sentinels every N iterations
 
         # Record baseline allocator state
-        initial_stats = get_allocator_stats()
+        initial_stats = self.initial_stats
         initial_allocated_bytes = initial_stats["allocated_bytes"]
         initial_num_allocs = initial_stats["num_allocs"]
 
@@ -974,35 +983,27 @@ class TestAllocatorE2E(TestCase):
 
         Note: Run under ThreadSanitizer (TSan) to verify TSan-clean execution.
         """
-        import threading
-        import time
 
         N = 8  # Number of threads
-        T = 200  # Iterations per thread (reduced from 1000 for multi-threaded context)
-        TENSOR_SIZE = 1024  # 4KB per tensor (smaller for multi-threaded context)
+        T = 200  # Iterations per thread
+        TENSOR_SIZE = 1024  # 4KB per tensor
 
         # Record baseline allocator state
-        initial_stats = get_allocator_stats()
+        initial_stats = self.initial_stats
         initial_allocated_bytes = initial_stats["allocated_bytes"]
         initial_num_allocs = initial_stats["num_allocs"]
 
-        print(
-            f"[TEST DEBUG] Initial state: {initial_num_allocs} allocs, {initial_allocated_bytes} bytes"
-        )
-        print(f"[TEST DEBUG] Spawning {N} threads, each running {T} iterations")
-
         # Shared state for tracking errors
-        errors = []  # Thread-safe list for collecting errors
+        errors = []
         errors_lock = threading.Lock()
 
         def thread_worker(thread_id):
             """Worker function that each thread executes."""
             try:
-                # Thread-local sentinel base: use thread_id to ensure uniqueness across threads
-                # Thread 0: sentinels 10000-10199
-                # Thread 1: sentinels 20000-20199
-                # etc.
-                sentinel_base = (thread_id + 1) * 10000
+                # Per-thread sentinel base spaced 1000 apart, all within float16
+                # range (max 65504). Thread 0: 1000–1199, thread 1: 2000–2199, …,
+                # thread 7: 8000–8199.
+                sentinel_base = (thread_id + 1) * 1000
 
                 for iteration in range(T):
                     # Use a unique sentinel for this thread and iteration
@@ -1033,11 +1034,10 @@ class TestAllocatorE2E(TestCase):
                     # Clean up for next iteration
                     del tensor2
 
-                # Final GC for this thread
-                gc.collect()
-
             except Exception as e:
-                # Catch any exceptions (including allocator failures, double-frees, etc.)
+                # Catches Python-level exceptions (e.g. RuntimeError from a failed
+                # allocation) and routes them back to the main thread. C-level crashes
+                # (SIGABRT from a double-free) terminate the process and bypass this.
                 error_msg = (
                     f"Thread {thread_id} raised exception: {type(e).__name__}: {e}"
                 )
@@ -1046,55 +1046,47 @@ class TestAllocatorE2E(TestCase):
 
         # Spawn N threads
         threads = []
-        start_time = time.time()
-
         for thread_id in range(N):
             thread = threading.Thread(target=thread_worker, args=(thread_id,))
             thread.start()
             threads.append(thread)
 
-        # Wait for all threads to complete
         for thread in threads:
             thread.join()
 
-        elapsed_time = time.time() - start_time
-        print(f"[TEST DEBUG] All {N} threads completed in {elapsed_time:.2f}s")
-
-        # Check for any errors reported by threads
+        # Check for any Python-level exceptions reported by threads.
+        # Note: C-level crashes (SIGABRT, segfault from a double-free) terminate
+        # the process and cannot be caught here — TSan is required for that.
         if errors:
-            error_summary = "\n".join(errors)
             self.fail(
-                f"Multi-threaded churn test detected {len(errors)} error(s):\n{error_summary}"
+                f"Multi-threaded churn detected {len(errors)} error(s):\n"
+                + "\n".join(errors)
             )
 
-        # Final GC to clean up any remaining allocations
+        # Two gc.collect() passes after all threads have joined.
+        # join() guarantees the thread function returned, but the OS thread's
+        # frame (and any tensors it still references) may not be released until
+        # CPython's threading bookkeeping drops the frame — which happens
+        # asynchronously and after join(). The first collect() releases those
+        # frames; the second collects anything their __del__ callbacks queued.
+        gc.collect()
         gc.collect()
 
         # Verify allocator state returned to baseline (no leak)
         final_stats = get_allocator_stats()
-        final_allocated_bytes = final_stats["allocated_bytes"]
-        final_num_allocs = final_stats["num_allocs"]
-
-        print(
-            f"[TEST DEBUG] After {N} threads × {T} iterations: {final_num_allocs} allocs, {final_allocated_bytes} bytes"
-        )
-
-        # Verify no memory leak
         self.assertEqual(
-            final_num_allocs,
+            final_stats["num_allocs"],
             initial_num_allocs,
-            f"Number of allocations should return to baseline after multi-threaded churn. "
-            f"Expected {initial_num_allocs}, got {final_num_allocs}. "
-            f"This indicates a memory leak of {final_num_allocs - initial_num_allocs} allocations.",
+            f"Allocation count should return to baseline after {N}×{T} iterations. "
+            f"Expected {initial_num_allocs}, got {final_stats['num_allocs']}. "
+            f"Leak: {final_stats['num_allocs'] - initial_num_allocs} allocations.",
         )
-
         self.assertEqual(
-            final_allocated_bytes,
+            final_stats["allocated_bytes"],
             initial_allocated_bytes,
-            f"Allocated bytes should return to baseline after multi-threaded churn. "
-            f"Expected {initial_allocated_bytes}, got {final_allocated_bytes}. "
-            f"Delta: {final_allocated_bytes - initial_allocated_bytes} bytes. "
-            f"This indicates a memory leak.",
+            f"Allocated bytes should return to baseline after {N}×{T} iterations. "
+            f"Expected {initial_allocated_bytes}, got {final_stats['allocated_bytes']}. "
+            f"Delta: {final_stats['allocated_bytes'] - initial_allocated_bytes} bytes.",
         )
 
         print("[TEST RESULT] PASS - Multi-threaded churn test completed successfully")
@@ -1102,7 +1094,6 @@ class TestAllocatorE2E(TestCase):
         print("  No cross-thread sentinel leakage detected")
         print("  No allocator-side double-free or assertion failure")
         print("  Total allocator free-space matches baseline")
-        print(f"  Execution time: {elapsed_time:.2f}s")
         print("  Note: Run under ThreadSanitizer (TSan) to verify TSan-clean execution")
 
 
