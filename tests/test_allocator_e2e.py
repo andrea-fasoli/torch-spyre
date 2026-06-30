@@ -1003,9 +1003,6 @@ class TestAllocatorE2E(TestCase):
                     del tensor2
 
             except Exception as e:
-                # Catches Python-level exceptions (e.g. RuntimeError from a failed
-                # allocation) and routes them back to the main thread. C-level crashes
-                # (SIGABRT from a double-free) terminate the process and bypass this.
                 error_msg = (
                     f"Thread {thread_id} raised exception: {type(e).__name__}: {e}"
                 )
@@ -1023,8 +1020,6 @@ class TestAllocatorE2E(TestCase):
             thread.join()
 
         # Check for any Python-level exceptions reported by threads.
-        # Note: C-level crashes (SIGABRT, segfault from a double-free) terminate
-        # the process and cannot be caught here — TSan is required for that.
         if errors:
             self.fail(
                 f"Multi-threaded churn detected {len(errors)} error(s):\n"
@@ -1056,13 +1051,6 @@ class TestAllocatorE2E(TestCase):
             f"Expected {initial_allocated_bytes}, got {final_stats['allocated_bytes']}. "
             f"Delta: {final_stats['allocated_bytes'] - initial_allocated_bytes} bytes.",
         )
-
-        print("[TEST RESULT] PASS - Multi-threaded churn test completed successfully")
-        print(f"  {N} threads × {T} iterations = {N * T} total allocations")
-        print("  No cross-thread sentinel leakage detected")
-        print("  No allocator-side double-free or assertion failure")
-        print("  Total allocator free-space matches baseline")
-        print("  Note: Run under ThreadSanitizer (TSan) to verify TSan-clean execution")
 
 
 if __name__ == "__main__":
