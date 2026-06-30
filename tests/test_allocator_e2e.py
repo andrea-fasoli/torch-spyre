@@ -519,17 +519,20 @@ class TestAllocatorE2E(TestCase):
 
     def test_gc_mixed_scope_release(self):
         """
-        Garbage Collector mixed-scope release
+        Mixed-scope tensor release via reference counting.
 
-        Allocate tensors across several Python scopes:
-        - Some held in module-level globals (still reachable)
-        - Others in function locals (unreachable after function return)
+        Allocate tensors across two scopes:
+        - Some held in a long-lived dict (still reachable throughout the test)
+        - Others in a function's local scope (freed by refcounting on return)
 
-        After gc.collect(), verify that exactly the unreachable ones were released
-        and the reachable ones remain allocated.
+        Verify that exactly the out-of-scope tensors are released when the function
+        returns and that the long-lived ones remain allocated.
 
-        This test verifies that Python's garbage collector correctly distinguishes
-        between reachable and unreachable tensors, and only frees the unreachable ones.
+        Note: function-local tensors are non-cyclic, so CPython's reference counting
+        frees them immediately when the function returns — gc.collect() is a no-op
+        for them. The test verifies that refcount-driven release correctly distinguishes
+        reachable from unreachable tensors and that only the unreachable allocations
+        are removed from the allocator's accounting.
         """
         # Record baseline allocator state
         initial_stats = get_allocator_stats()
@@ -595,9 +598,8 @@ class TestAllocatorE2E(TestCase):
         # Call function to allocate local tensors
         stats_with_locals = allocate_local_tensors()
 
-        # At this point, local_tensors list is out of scope and unreachable
-        # but the memory hasn't been freed yet (GC hasn't run)
-        stats_with_locals["allocated_bytes"] - initial_allocated_bytes
+        # At this point, local_tensors is out of scope and has already been freed
+        # by refcounting. stats_with_locals captured the state while it was still alive.
         total_num_allocs = stats_with_locals["num_allocs"] - initial_num_allocs
 
         self.assertEqual(
@@ -606,10 +608,11 @@ class TestAllocatorE2E(TestCase):
             f"Expected {NUM_GLOBALS + NUM_LOCALS} total allocations, got {total_num_allocs}",
         )
 
-        # Force garbage collection to free unreachable local tensors
+        # Local tensors were already freed by refcounting on function return above.
+        # gc.collect() is a no-op for them but is called for hygiene.
         gc.collect()
 
-        # Verify that only local tensors were freed, globals remain
+        # Verify that only the out-of-scope tensors were freed, globals remain
         stats_after_gc = get_allocator_stats()
         remaining_allocated_bytes = (
             stats_after_gc["allocated_bytes"] - initial_allocated_bytes
@@ -621,19 +624,16 @@ class TestAllocatorE2E(TestCase):
             remaining_num_allocs,
             NUM_GLOBALS,
             f"Expected {NUM_GLOBALS} allocations to remain (globals), got {remaining_num_allocs}. "
-            f"This indicates that {'not all' if remaining_num_allocs > NUM_GLOBALS else 'too many'} "
-            f"unreachable tensors were freed.",
+            f"{'Local tensors were not all freed.' if remaining_num_allocs > NUM_GLOBALS else 'Too many allocations were freed.'}",
         )
 
         # Check that allocated bytes match the global tensors only
-        # We expect the bytes to be close to globals_allocated_bytes
-        # (exact match, since FlexAllocator coalesces freed blocks)
+        # (exact match expected, since FlexAllocator coalesces freed blocks)
         self.assertEqual(
             remaining_allocated_bytes,
             globals_allocated_bytes,
             f"Expected {globals_allocated_bytes} bytes to remain (globals), got {remaining_allocated_bytes}. "
-            f"Delta: {remaining_allocated_bytes - globals_allocated_bytes} bytes. "
-            f"This indicates a memory leak or that unreachable tensors were not fully freed.",
+            f"Delta: {remaining_allocated_bytes - globals_allocated_bytes} bytes.",
         )
 
         # Verify that global tensors are still accessible and valid
@@ -675,10 +675,6 @@ class TestAllocatorE2E(TestCase):
             final_stats["num_allocs"],
             initial_num_allocs,
             "All allocations should be freed after cleanup",
-        )
-
-        print(
-            f"[TEST DEBUG] After cleanup: {final_stats['num_allocs']} allocs, {final_stats['allocated_bytes']} bytes"
         )
 
     def test_gc_cyclic_references(self):
