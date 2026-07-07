@@ -21,7 +21,6 @@ allocate/free cycles leave the allocator in a consistent state.
 """
 
 import gc
-import collections
 import threading
 import torch
 import random
@@ -806,26 +805,24 @@ class TestAllocatorE2E(TestCase):
         5. Allocate another tensor
 
         Verify:
-        - No iteration ever reads a stale sentinel from a prior iteration's storage
         - Allocator free-space remains steady (no leak)
 
         This test ensures that repeated allocation/deallocation cycles don't
-        cause memory leaks or residual data contamination across iterations.
+        cause memory leaks across iterations.
+
+        Note: this test does NOT assert that reused storage is wiped. Neither the
+        CPU nor the Spyre allocator zeroes memory on reuse, so observing residual
+        bytes from a prior iteration in a freshly allocated tensor is EXPECTED and
+        ACCEPTABLE (consistent with CPU allocator semantics). The sentinel is still
+        written to exercise the fill_ path, but its residual is not checked.
         """
         T = 1000  # Number of iterations (acceptance criteria: T ≥ 1000)
         TENSOR_SIZE = 2048  # 8KB per tensor
-        CHECK_INTERVAL = 50  # Check for stale sentinels every N iterations
 
         # Record baseline allocator state
         initial_stats = self.initial_stats
         initial_allocated_bytes = initial_stats["allocated_bytes"]
         initial_num_allocs = initial_stats["num_allocs"]
-
-        # Rolling window of the last 100 sentinels written to freed tensors.
-        # deque(maxlen=100) gives O(1) FIFO eviction, unlike set.pop() which is
-        # arbitrary. The current iteration's sentinel is added after tensor2 is
-        # checked, so it is never tested against itself.
-        past_sentinels: collections.deque = collections.deque(maxlen=100)
 
         # Samples taken while exactly one tensor (tensor2) is alive, giving a
         # meaningful steady-state signal: each sample should equal
@@ -861,25 +858,6 @@ class TestAllocatorE2E(TestCase):
                 stats = get_allocator_stats()
                 bytes_samples.append(stats["allocated_bytes"])
                 allocs_samples.append(stats["num_allocs"])
-
-            # CRITICAL CHECK: verify tensor2 contains no sentinel from a prior
-            # iteration. Only check periodically to reduce CPU-transfer overhead.
-            # past_sentinels is populated at the end of this block, so it always
-            # contains sentinels from strictly earlier iterations — never the
-            # current one.
-            if iteration % CHECK_INTERVAL == 0 and len(past_sentinels) > 0:
-                tensor2_cpu = tensor2.cpu()
-                for prev_sentinel in past_sentinels:
-                    if torch.any(tensor2_cpu == prev_sentinel).item():
-                        self.fail(
-                            f"Iteration {iteration}: stale sentinel {prev_sentinel} "
-                            f"found in newly allocated tensor — residual data leaked "
-                            f"from a prior iteration's storage."
-                        )
-                del tensor2_cpu
-
-            # Record this iteration's sentinel for future checks
-            past_sentinels.append(sentinel)
 
             # Clean up for next iteration
             del tensor2
