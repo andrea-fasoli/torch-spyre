@@ -15,6 +15,7 @@
  */
 #include "spyre_allocator.h"
 
+#include <atomic>
 #include <cstdlib>  // std::getenv
 #include <memory>
 #include <mutex>
@@ -53,14 +54,24 @@ namespace {
 //  - Interleaved tensors are usable on the **eager copy path only**. The
 //    compiled JobPlan builder still asserts single-chunk (T7/T8, gated by the
 //    T1 verdict), so do not set this in a process that compiles kernels.
-//  - Unset (the default) leaves behavior byte-for-byte identical to Bind{0}.
-bool emulateInterleaveEnabled() {
-  static const bool enabled = []() {
+//  - Off (the default) leaves behavior byte-for-byte identical to Bind{0}.
+//
+// The env var seeds the initial value, but the flag is a process-global that
+// `debugSetEmulateInterleave` can flip at runtime. That matters: only one
+// process may hold the Spyre device, so a test cannot compare an interleaved
+// run against a Bind{0} baseline by spawning a second process — both
+// placements have to be exercised in the same process, under the same topology.
+std::atomic<bool>& emulateInterleaveFlag() {
+  static std::atomic<bool> flag{[]() {
     const char* env = std::getenv("TORCH_SPYRE_EMULATE_INTERLEAVE");
     return env != nullptr && std::string_view(env) != "" &&
            std::string_view(env) != "0";
-  }();
-  return enabled;
+  }()};
+  return flag;
+}
+
+bool emulateInterleaveEnabled() {
+  return emulateInterleaveFlag().load(std::memory_order_relaxed);
 }
 
 }  // namespace
@@ -279,6 +290,22 @@ void SpyreAllocator::copy_data(void* dest, const void* src,
 uint64_t SpyreAllocator::compositeAddressToDmva(
     const flex::CompositeAddress& addr) const {
   return getFlexAllocator()->compositeAddressToDmva(addr);
+}
+
+// ─── TEMPORARY (T5, 1p5-emulation epic) ──────────────────────────────────────
+// Flip the interleave gate for the rest of this process; returns the previous
+// value so a caller can restore it. See emulateInterleaveFlag().
+bool SpyreAllocator::debugSetEmulateInterleave(bool enabled) {
+  return emulateInterleaveFlag().exchange(enabled, std::memory_order_relaxed);
+}
+
+// ─── TEMPORARY (T5, 1p5-emulation epic) ──────────────────────────────────────
+// Number of memory domains flex reports (1 unless FLEX_NUM_MEMORY_DOMAINS is
+// set), so a test can skip cleanly instead of asserting on a single-domain
+// topology. Requires the runtime to be started.
+size_t SpyreAllocator::debugNumMemoryDomains() {
+  auto flex_alloc = getFlexAllocator();
+  return flex_alloc ? flex_alloc->topology().num_domains() : 0;
 }
 
 // ─── TEMPORARY (T5, 1p5-emulation epic) ──────────────────────────────────────

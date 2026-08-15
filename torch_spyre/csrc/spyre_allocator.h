@@ -107,10 +107,18 @@ struct SpyreAllocator final : public c10::DeviceAllocator {
   uint64_t compositeAddressToDmva(const flex::CompositeAddress& addr) const;
 
   // ─── TEMPORARY (T5, 1p5-emulation epic) ────────────────────────────────────
-  // Return the chunk layout of a Spyre tensor's device allocation, for test
-  // assertions only. Remove with the interleave env gate when T6 lands.
+  // Test-only hooks for the copy-only thin slice. Remove with the interleave
+  // gate when T6 lands.
+  //
+  // Return the chunk layout of a Spyre tensor's device allocation.
   static std::vector<CompositeChunkInfo> debugCompositeChunks(
       const at::Tensor& tensor);
+  // Flip the interleave gate at runtime; returns the previous value. Needed
+  // because only one process may hold the device, so an interleaved run and its
+  // Bind{0} baseline must both happen in this process.
+  static bool debugSetEmulateInterleave(bool enabled);
+  // Memory domains flex reports; 0 if the runtime is not started.
+  static size_t debugNumMemoryDomains();
 };
 
 }  // namespace spyre
