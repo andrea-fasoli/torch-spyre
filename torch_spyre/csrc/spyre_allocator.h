@@ -15,14 +15,17 @@
  */
 #pragma once
 
+#include <ATen/core/Tensor.h>
 #include <c10/core/CachingDeviceAllocator.h>
 #include <c10/core/Device.h>
 #include <c10/core/Stream.h>
 
+#include <cstdint>
 #include <flex/flex.hpp>
 #include <memory>
 #include <mutex>
 #include <utility>
+#include <vector>
 
 namespace spyre {
 
@@ -32,6 +35,26 @@ struct SharedOwnerCtx {
 
   SharedOwnerCtx(flex::CompositeAddress addr, signed char dev_id)
       : composite_addr(std::move(addr)), device_id(dev_id) {}
+};
+
+// ─── TEMPORARY (T5, 1p5-emulation epic) ──────────────────────────────────────
+// Per-chunk description of a tensor's device allocation, exposed to Python so
+// the thin-slice test can assert that an allocation really is interleaved
+// (multi-chunk, one chunk per memory domain, every chunk backed by a real
+// XLat segment) rather than silently passing on a single-chunk allocation.
+//
+// Debug-only introspection. Remove together with the interleave env gate when
+// T6 replaces it with a real topology-derived eligibility policy.
+struct CompositeChunkInfo {
+  uint32_t domain_id;
+  uint64_t region_id;
+  uint64_t offset;
+  uint64_t size;
+  // Region's XLat segment id. Under an emulated multi-domain topology a surplus
+  // tensor region can carry UNMAPPED_SEGMENT_ID, meaning it has no device
+  // address and must never be dispatched (flex T3 Finding B / T4 backstop).
+  uint32_t segment_id;
+  bool segment_mapped;
 };
 
 // A custom allocator for our custom device, which returns a handle to the
@@ -82,6 +105,12 @@ struct SpyreAllocator final : public c10::DeviceAllocator {
   void copy_data(void* dest, const void* src, std::size_t count) const final;
 
   uint64_t compositeAddressToDmva(const flex::CompositeAddress& addr) const;
+
+  // ─── TEMPORARY (T5, 1p5-emulation epic) ────────────────────────────────────
+  // Return the chunk layout of a Spyre tensor's device allocation, for test
+  // assertions only. Remove with the interleave env gate when T6 lands.
+  static std::vector<CompositeChunkInfo> debugCompositeChunks(
+      const at::Tensor& tensor);
 };
 
 }  // namespace spyre
