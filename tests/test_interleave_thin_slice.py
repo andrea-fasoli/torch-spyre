@@ -17,11 +17,10 @@
 """
 Copy-only thin slice: an interleaved tensor round-tripping on 1p0-PF.
 
-This is the Definition-of-Done milestone (T5) of the "emulate a 1p5 memory
-topology on 1p0-PF" epic. It drives an **interleaved** (multi-chunk) device
-allocation through the **eager** copy path — ``x.to("spyre")`` (H2D) then
-``.cpu()`` (D2H) — under a synthetic multi-domain topology, and requires the
-round-tripped values to match a ``Bind{0}`` baseline exactly.
+It drives an **interleaved** (multi-chunk) device allocation through the
+**eager** copy path — ``x.to("spyre")`` (H2D) then ``.cpu()`` (D2H) — under
+a synthetic multi-domain topology, and requires the round-tripped values to
+match a ``Bind{0}`` baseline exactly.
 
 Deliberately **no compute op and no torch.compile**: the compiled JobPlan
 builder still asserts single-chunk addresses, and interleaved compute is not
@@ -63,8 +62,7 @@ domain count, and the 1p0 default of 7 is not. Without these the test **skips**,
 which is what happens in a default ``pytest tests/`` sweep.
 
 Interleaved placement itself is requested in-process via a temporary gate
-(``TORCH_SPYRE_EMULATE_INTERLEAVE`` / ``_spyre_debug_set_emulate_interleave``),
-replaced by a real eligibility policy in T6.
+(``TORCH_SPYRE_EMULATE_INTERLEAVE`` / ``_spyre_debug_set_emulate_interleave``).
 
 Both placements are exercised in **one** process, on purpose: only one process
 may hold the Spyre device (see ``torch_spyre/__init__.py`` — "Spyre can't be
@@ -92,14 +90,13 @@ K_MAX_BUF_SIZE = 4 * 1024 * 1024
 SEN169_FP16_STEP = 2.0**-9
 
 # (case name, shape, dtype, bit_exact) — sizes chosen to stress the flex
-# multi-chunk DMA path (T4):
+# multi-chunk DMA path:
 #  * "aligned"    — device size divides evenly across the domains.
 #  * "one_stick" / "uneven_sticks" — the per-domain share is NOT a multiple of
 #    the 128 B device alignment, so flex rounds each chunk up and total_size()
 #    exceeds the tensor's storage size.
 #  * "large"      — 24 MiB, i.e. 6 MiB per chunk at 4 domains, so every chunk
-#    must itself be split into multiple <= kMaxBufSize transfers. This is what
-#    exercises T4's size-slice loop nested inside the per-chunk loop.
+#    must itself be split into multiple <= kMaxBufSize transfers.
 #
 # `bit_exact` is False exactly where the host and device encodings of the dtype
 # differ (fp16: IEEE_FP16 vs SEN169_FP16), which makes the *conversion* lossy
@@ -248,7 +245,7 @@ class TestInterleaveThinSlice(TestCase):
                     len({c["region_id"] for c in chunks}), self.num_domains
                 )
                 # A region carrying UNMAPPED_SEGMENT_ID has no device address
-                # and must never be dispatched (flex T3 Finding B / T4 guard).
+                # and must never be dispatched.
                 for chunk in chunks:
                     self.assertTrue(chunk["segment_mapped"], msg=str(chunk))
                 # Chunks are equal-sized and cover the whole tensor.
@@ -317,7 +314,7 @@ class TestInterleaveThinSlice(TestCase):
     def test_per_chunk_transfer_exceeds_buffer_size(self):
         """The "large" case must really put > 4 MiB in each chunk.
 
-        This is the only case that exercises T4's size-slice loop nested inside
+        This is the only case that exercises size-slice loop nested inside
         the per-chunk loop; assert the premise so the coverage cannot silently
         rot if the shape is edited.
         """
