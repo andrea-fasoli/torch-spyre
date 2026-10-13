@@ -58,7 +58,7 @@ IGNORED_TEST_FILES=(
   # lane provides, so it is skip-only in CI. Revisit when a KTIR/mlir_ktdp lane
   # exists.
   "inductor/test_ktir_emitter.py"
-  # 1p5-emulation thin slice (temporary, removed with its interleave gate in T6):
+  # Interleaved copy round trip under flex's emulated 4-domain topology:
   # needs FLEX_DEVICE=EMUL1p5 on the command line (read once at runtime start)
   # on live 1p0 in VF mode. No CI lane provides it, so the test skips itself
   # under a default sweep. Revisit if an EMUL1p5 lane is added.

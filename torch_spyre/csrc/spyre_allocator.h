@@ -89,9 +89,7 @@ struct SpyreAllocator final : public c10::DeviceAllocator {
   uint64_t compositeAddressToDeviceAddress(
       const flex::CompositeAddress& addr) const;
 
-  // ─── TEMPORARY (T5, 1p5-emulation epic) ────────────────────────────────────
-  // Test-only hooks for the copy-only thin slice. Remove with the interleave
-  // gate when T6 lands.
+  // Debug hooks for multi-domain (interleaved) placement tests.
   //
   // Flip the interleave gate at runtime; returns the previous value. Needed
   // because only one process may hold the device, so an interleaved run and

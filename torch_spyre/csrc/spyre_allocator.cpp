@@ -35,25 +35,20 @@ namespace spyre {
 
 namespace {
 
-// ─── TEMPORARY (T5, 1p5-emulation epic) ──────────────────────────────────────
-// Coarse env gate that makes every *tensor* storage allocation interleave
-// across all memory domains flex reports, so the epic's copy-only thin slice
-// (allocate → H2D → D2H) can be exercised on real 1p0 silicon in VF mode under
-// the emulated 4-domain topology:
+// Env gate that makes every *tensor* storage allocation interleave across all
+// memory domains flex reports, e.g. under flex's emulated 4-domain topology:
 //
 //   FLEX_DEVICE=EMUL1p5 TORCH_SPYRE_EMULATE_INTERLEAVE=1
 //
-// This is deliberately NOT an eligibility policy: it interleaves everything it
-// sees. T6 replaces it with a topology-derived directive that decides per
-// tensor; delete this gate then.
+// It is not an eligibility policy: it interleaves every tensor storage.
 //
-// Scope and safety:
+// Scope:
 //  - Only the c10::Allocator entry point (`allocate(nbytes)`) consults it, so
 //    it affects tensor storages only. The program allocation uses the
 //    directive-taking overload with its own Bind{0} (prepare_kernel.cpp) and is
 //    untouched.
 //  - Interleaved tensors are usable on the **eager copy path only**. The
-//    compiled JobPlan builder still asserts single-chunk (T7/T8), so do not set
+//    compiled JobPlan builder requires single-chunk addresses, so do not set
 //    this in a process that compiles kernels.
 //  - Off (the default) leaves behavior byte-for-byte identical to Bind{0}.
 //
@@ -194,7 +189,6 @@ void SpyreAllocator::recordRelease(size_t nbytes, void* data, int device_id) {
 }
 
 c10::DataPtr SpyreAllocator::allocate(size_t nbytes) {
-  // ─── TEMPORARY (T5, 1p5-emulation epic) ────────────────────────────────────
   // See emulateInterleaveEnabled(). Skipped for nbytes == 0 so the empty
   // allocation keeps returning early below without touching the runtime.
   if (nbytes != 0 && emulateInterleaveEnabled()) {
@@ -296,14 +290,12 @@ uint64_t SpyreAllocator::compositeAddressToDeviceAddress(
       addr, getFlexAllocator()->getIdToRegionMap());
 }
 
-// ─── TEMPORARY (T5, 1p5-emulation epic) ──────────────────────────────────────
 // Flip the interleave gate for the rest of this process; returns the previous
 // value so a caller can restore it. See emulateInterleaveFlag().
 bool SpyreAllocator::debugSetEmulateInterleave(bool enabled) {
   return emulateInterleaveFlag().exchange(enabled, std::memory_order_relaxed);
 }
 
-// ─── TEMPORARY (T5, 1p5-emulation epic) ──────────────────────────────────────
 // Number of memory domains flex reports (4 under FLEX_DEVICE=EMUL1p5, else 1),
 // so a test can skip cleanly instead of asserting on a single-domain topology.
 size_t SpyreAllocator::debugNumMemoryDomains() {
@@ -311,7 +303,6 @@ size_t SpyreAllocator::debugNumMemoryDomains() {
   return flex_alloc ? flex_alloc->topology().num_domains() : 0;
 }
 
-// ─── TEMPORARY (T5, 1p5-emulation epic) ──────────────────────────────────────
 // Hardware segment of each chunk of a Spyre tensor's allocation, in
 // get_composite_address(tensor).chunks() order; std::nullopt for a chunk whose
 // region has no tensor segment (flex's UNMAPPED_SEGMENT_ID), which must never

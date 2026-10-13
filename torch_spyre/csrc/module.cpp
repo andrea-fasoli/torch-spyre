@@ -817,24 +817,22 @@ PYBIND11_MODULE(_C, m) {
       },
       py::arg("device"), "Reset peak allocator statistics");
 
-  // ─── TEMPORARY (T5, 1p5-emulation epic) ──────────────────────────────────
-  // Test-only hooks for the copy-only thin slice
+  // Debug hooks for multi-domain (interleaved) placement tests
   // (tests/test_interleave_thin_slice.py). Chunk geometry comes from
-  // get_composite_address; these add only what it does not expose. Remove
-  // together with TORCH_SPYRE_EMULATE_INTERLEAVE when T6 lands.
+  // get_composite_address; these add only what it does not expose.
   m.def(
       "_spyre_debug_set_emulate_interleave",
       [](bool enabled) {
         return spyre::SpyreAllocator::debugSetEmulateInterleave(enabled);
       },
       py::arg("enabled"),
-      "DEBUG/TEMPORARY: enable/disable interleaved tensor placement for the "
+      "DEBUG: enable/disable interleaved tensor placement for the "
       "rest of this process; returns the previous setting.");
 
   m.def(
       "_spyre_debug_num_memory_domains",
       []() { return spyre::SpyreAllocator::debugNumMemoryDomains(); },
-      "DEBUG/TEMPORARY: number of memory domains flex reports (4 under "
+      "DEBUG: number of memory domains flex reports (4 under "
       "FLEX_DEVICE=EMUL1p5, else 1); 0 if the runtime is not started.");
 
   m.def(
@@ -843,7 +841,7 @@ PYBIND11_MODULE(_C, m) {
         return spyre::SpyreAllocator::debugChunkSegmentIds(tensor);
       },
       py::arg("tensor"),
-      "DEBUG/TEMPORARY: hardware segment id of each chunk of a Spyre "
+      "DEBUG: hardware segment id of each chunk of a Spyre "
       "tensor's allocation, in get_composite_address(tensor).chunks() order; "
       "None where the chunk's region has no tensor segment.");
 
