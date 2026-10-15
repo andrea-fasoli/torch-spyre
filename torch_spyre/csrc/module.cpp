@@ -818,7 +818,7 @@ PYBIND11_MODULE(_C, m) {
       py::arg("device"), "Reset peak allocator statistics");
 
   // Debug hooks for multi-domain (interleaved) placement tests
-  // (tests/test_interleave_thin_slice.py). Chunk geometry comes from
+  // (tests/test_interleaved_copy.py). Chunk geometry comes from
   // get_composite_address; these add only what it does not expose.
   m.def(
       "_spyre_debug_set_emulate_interleave",

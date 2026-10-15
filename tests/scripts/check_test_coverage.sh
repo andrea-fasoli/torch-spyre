@@ -62,7 +62,7 @@ IGNORED_TEST_FILES=(
   # needs FLEX_DEVICE=EMUL1p5 on the command line (read once at runtime start)
   # on live 1p0 in VF mode. No CI lane provides it, so the test skips itself
   # under a default sweep. Revisit if an EMUL1p5 lane is added.
-  "test_interleave_thin_slice.py"
+  "test_interleaved_copy.py"
 )
 
 # ── Ignore list: config files ─────────────────────────────────────────────────

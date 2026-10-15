@@ -15,12 +15,14 @@
 # Owner(s): ["module: cpp"]
 
 """
-Interleaved tensor round trip on 1p0 in VF mode.
+Interleaved tensor copy and fill on 1p0 in VF mode.
 
 It drives one large **interleaved** (multi-chunk) device allocation through the
-**eager** copy path — ``x.to("spyre")`` (H2D) then ``.cpu()`` (D2H) — under
-the emulated 4-domain topology of ``FLEX_DEVICE=EMUL1p5``, and requires the
-round-tripped values to be bit-exact and to match a ``Bind{0}`` baseline.
+**eager** copy path — ``x.to("spyre")`` (H2D) then ``.cpu()`` (D2H) — and through
+a device-side fill, under the emulated 4-domain topology of
+``FLEX_DEVICE=EMUL1p5``. The round trip must be bit-exact and every filled
+element must read back as the fill value. A ``Bind{0}`` round trip of the same
+data serves as a control.
 
 There is **no compute op and no torch.compile**: the compiled JobPlan builder
 requires single-chunk addresses.
@@ -35,19 +37,25 @@ requires single-chunk addresses.
 * **fp32:** ``float32`` is ``IEEE_FP32`` on both host and device, so the H2D/D2H
   conversion is a pure layout shuffle and the round trip must be bit-exact.
 
+## What a round trip cannot show
+
+H2D and D2H use the same host-offset → chunk mapping, so a mapping error that is
+the same in both directions still round-trips exactly. That chunks land in
+their own regions is checked in flex, by per-chunk readback.
+
 ## Running this test
 
 The emulated topology is a flex setting read when the device runtime starts, so
 it must be set **on the pytest command line**:
 
 ```bash
-FLEX_DEVICE=EMUL1p5 python -m pytest tests/test_interleave_thin_slice.py -v -s
+FLEX_DEVICE=EMUL1p5 python -m pytest tests/test_interleaved_copy.py -v -s
 ```
 
 ``FLEX_DEVICE=EMUL1p5`` submits through the VF path and reports 4 memory domains
 (``FLEX_EMUL_MAX_REGIONS`` defaults to 8). Under any other device flex reports a
 single domain and the whole class **skips**, which is what happens in a default
-``pytest tests/`` sweep.
+``pytest tests/`` sweep. ``-s`` shows the observed layout and timings.
 
 Interleaved placement itself is requested in-process via an env gate
 (``TORCH_SPYRE_EMULATE_INTERLEAVE`` / ``_spyre_debug_set_emulate_interleave``).
@@ -59,7 +67,7 @@ baseline therefore differs from the interleaved run only in placement.
 """
 
 import contextlib
-import hashlib
+import os
 import time
 import unittest
 
@@ -69,10 +77,13 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 
 SEED = 20260815
 
-RUN_COMMAND = "FLEX_DEVICE=EMUL1p5 python -m pytest tests/test_interleave_thin_slice.py"
+RUN_COMMAND = "FLEX_DEVICE=EMUL1p5 python -m pytest tests/test_interleaved_copy.py"
 
-# flex's default DMA slice size in VF mode (RuntimeConfig::DataTransferBufferSize).
-DMA_SLICE_BYTES = 256 * 1024 * 1024
+# Most bytes flex moves in one DMA slice (RuntimeConfig::DataTransferBufferSize):
+# FLEX_DATA_TRANSFER_BUFFER_SIZE if set, else 256 MiB.
+DMA_SLICE_BYTES = int(
+    os.environ.get("FLEX_DATA_TRANSFER_BUFFER_SIZE", 256 * 1024 * 1024)
+)
 
 # fp32, 10241 x 32800 = ~1.25 GiB, i.e. ~336 MB per chunk at 4 domains, so every
 # chunk takes two DMA slices. The last dim is 1025 sticks (32 fp32 each) and the
@@ -80,6 +91,11 @@ DMA_SLICE_BYTES = 256 * 1024 * 1024
 # chunk up to the 128 B device alignment and total_size() exceeds the storage.
 SHAPE = [10241, 32800]
 DTYPE = torch.float32
+
+# Exactly representable in fp32, and non-zero so a chunk that was never filled
+# cannot pass by happening to contain zeros. `torch.full` on spyre is
+# `torch.empty` + the device-side FillDMA (see torch_spyre/ops/eager.py).
+FILL_VALUE = 2.5
 
 
 @contextlib.contextmanager
@@ -113,11 +129,6 @@ def _chunks(dev: torch.Tensor) -> list:
     ]
 
 
-def _digest(tensor: torch.Tensor) -> str:
-    # Hash the tensor's buffer in place; tobytes() would copy ~1.25 GiB.
-    return hashlib.sha256(tensor.contiguous().numpy().data).hexdigest()
-
-
 def _max_relative_error(back: torch.Tensor, host: torch.Tensor) -> float:
     """Largest relative deviation, in units of the host magnitude.
 
@@ -140,6 +151,7 @@ def _round_trip(interleaved: bool) -> dict:
     start = time.perf_counter()
     with _interleaved_placement(interleaved):
         dev = host.to("spyre")
+    torch.spyre.synchronize()
     h2d_seconds = time.perf_counter() - start
 
     chunks = _chunks(dev)
@@ -150,24 +162,52 @@ def _round_trip(interleaved: bool) -> dict:
 
     exact = bool(torch.equal(back, host))
     return {
-        "host_bytes": host.untyped_storage().nbytes(),
         "chunks": chunks,
         "chunk_bytes_total": sum(c["size"] for c in chunks),
         "exact": exact,
         # Only computed on a mismatch: it allocates several tensor-sized buffers.
         "max_rel_err": 0.0 if exact else _max_relative_error(back, host),
-        "digest": _digest(back),
         "h2d_seconds": h2d_seconds,
         "d2h_seconds": d2h_seconds,
     }
 
 
-class TestInterleaveThinSlice(TestCase):
-    """Interleaved round trip under the emulated 4-domain topology (VF only)."""
+def _fill_read_back() -> dict:
+    """Fill an interleaved device tensor (no host source) and read it back."""
+    with _interleaved_placement(True):
+        dev = torch.full(SHAPE, FILL_VALUE, dtype=DTYPE, device="spyre")
+    chunks = _chunks(dev)
+    back = dev.cpu()
+    del dev
+    return {
+        "chunks": chunks,
+        "all_filled": bool(torch.all(back == FILL_VALUE).item()),
+    }
+
+
+def _print_layout(name: str, case: dict) -> None:
+    """Print a placement's observed layout and timings (shown under ``-s``)."""
+    print(
+        f"\n{name} shape={SHAPE} dtype={DTYPE}"
+        f" chunk_bytes_total={case['chunk_bytes_total']}"
+        f" exact={case['exact']}"
+        f" h2d={case['h2d_seconds']:.2f}s d2h={case['d2h_seconds']:.2f}s"
+    )
+    for chunk in case["chunks"]:
+        print(
+            f"  domain={chunk['domain_id']} region={chunk['region_id']}"
+            f" offset={chunk['offset']} size={chunk['size']}"
+            f" segment={chunk['segment_id']}"
+        )
+
+
+class TestInterleavedCopy(TestCase):
+    """Interleaved copy and fill under the emulated 4-domain topology (VF only)."""
 
     num_domains = 0
     interleaved: dict = {}
     baseline: dict = {}
+    fill: dict = {}
 
     @classmethod
     def setUpClass(cls):
@@ -187,16 +227,13 @@ class TestInterleaveThinSlice(TestCase):
         # suite does not re-upload the tensor per assertion.
         cls.interleaved = _round_trip(interleaved=True)
         cls.baseline = _round_trip(interleaved=False)
+        cls.fill = _fill_read_back()
+        _print_layout("interleaved", cls.interleaved)
+        _print_layout("bind0", cls.baseline)
 
-    def test_allocation_is_interleaved_across_all_domains(self):
-        """The tensor must be N chunks, one per domain, all device-addressable.
-
-        Without this the numeric tests below would pass vacuously on a
-        single-chunk allocation if the interleave gate ever stopped firing.
-        """
-        chunks = self.interleaved["chunks"]
+    def _assert_interleaved_layout(self, chunks: list) -> None:
+        """N chunks, one per domain, each in its own mapped region, equal-sized."""
         self.assertEqual(len(chunks), self.num_domains)
-        # One chunk per domain, each in its own region.
         self.assertEqual(
             sorted(c["domain_id"] for c in chunks), list(range(self.num_domains))
         )
@@ -205,16 +242,26 @@ class TestInterleaveThinSlice(TestCase):
         # never be dispatched.
         for chunk in chunks:
             self.assertIsNotNone(chunk["segment_id"], msg=str(chunk))
-        # Chunks are equal-sized and cover the whole tensor.
         self.assertEqual(len({c["size"] for c in chunks}), 1)
-        self.assertGreaterEqual(
-            self.interleaved["chunk_bytes_total"], self.interleaved["host_bytes"]
-        )
 
-    def test_baseline_allocation_is_single_chunk(self):
-        """With the gate off, allocation must stay exactly Bind{0}."""
-        self.assertEqual(len(self.baseline["chunks"]), 1)
-        self.assertEqual(self.baseline["chunks"][0]["domain_id"], 0)
+    def test_allocation_is_interleaved_across_all_domains(self):
+        """The tensor must be N chunks, one per domain, all device-addressable.
+
+        Without this the numeric tests below would pass vacuously on a
+        single-chunk allocation if the interleave gate ever stopped firing.
+        """
+        self._assert_interleaved_layout(self.interleaved["chunks"])
+
+    def test_chunks_are_padded(self):
+        """Per-domain shares are rounded up, so the chunks exceed the tensor.
+
+        SHAPE is chosen so the device size does not divide into 128 B-aligned
+        quarters; assert it so the uneven-chunk coverage cannot silently rot if
+        the shape is edited. The Bind{0} allocation gives the unpadded size.
+        """
+        self.assertGreater(
+            self.interleaved["chunk_bytes_total"], self.baseline["chunk_bytes_total"]
+        )
 
     def test_per_chunk_transfer_exceeds_dma_slice(self):
         """Each chunk must be larger than one DMA slice.
@@ -235,31 +282,29 @@ class TestInterleaveThinSlice(TestCase):
             ),
         )
 
-    def test_interleaved_matches_bind_baseline(self):
-        """Interleaved round-trip values must equal the Bind{0} baseline.
+    def test_baseline_allocation_is_single_chunk(self):
+        """With the gate off, allocation must stay exactly Bind{0}."""
+        self.assertEqual(len(self.baseline["chunks"]), 1)
+        self.assertEqual(self.baseline["chunks"][0]["domain_id"], 0)
 
-        Stronger than the round-trip check on its own: it rules out a
-        scatter/gather bug that is self-consistent (same wrong permutation both
-        ways) but still disagrees with the single-chunk path.
+    def test_baseline_round_trip_is_exact(self):
+        """Control: the same data round-trips exactly on a single chunk.
+
+        If the interleaved round trip fails while this passes, the fault is in
+        the multi-chunk path rather than in the copy path in general.
         """
-        self.assertEqual(self.interleaved["digest"], self.baseline["digest"])
+        self.assertTrue(
+            self.baseline["exact"],
+            msg=(
+                "Bind{0} round trip differs; max relative error "
+                f"{self.baseline['max_rel_err']:.3e}"
+            ),
+        )
 
-    def test_layout_report(self):
-        """Not an assertion — print the observed layout and timings."""
-        for name, case in (("interleaved", self.interleaved), ("bind0", self.baseline)):
-            print(
-                f"\n{name} shape={SHAPE} dtype={DTYPE}"
-                f" host_bytes={case['host_bytes']}"
-                f" chunk_bytes_total={case['chunk_bytes_total']}"
-                f" exact={case['exact']}"
-                f" h2d={case['h2d_seconds']:.2f}s d2h={case['d2h_seconds']:.2f}s"
-            )
-            for chunk in case["chunks"]:
-                print(
-                    f"  domain={chunk['domain_id']} region={chunk['region_id']}"
-                    f" offset={chunk['offset']} size={chunk['size']}"
-                    f" segment={chunk['segment_id']}"
-                )
+    def test_fill_writes_every_chunk(self):
+        """A device-side fill of an interleaved tensor must reach every element."""
+        self._assert_interleaved_layout(self.fill["chunks"])
+        self.assertTrue(self.fill["all_filled"])
 
 
 if __name__ == "__main__":
