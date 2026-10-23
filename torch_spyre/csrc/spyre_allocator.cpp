@@ -351,16 +351,15 @@ size_t SpyreAllocator::debugNumMemoryDomains() {
 //
 // flex does not export MemoryRegion, so the segment is read back through the
 // public addressing API instead: each chunk is encoded as a single-chunk
-// device address and decoded again. A region beyond the tensor-segment budget
-// encodes to a segment id past max_tensor_segment_id(), so it reads as
-// unmapped.
+// device address and decoded again. A 1p0 DMVA has a 3-bit segment field, so
+// a region beyond the tensor-segment budget (UNMAPPED_SEGMENT_ID) decodes to a
+// segment id past it and reads as unmapped.
 std::vector<std::optional<uint32_t>> SpyreAllocator::debugChunkSegmentIds(
     const at::Tensor& tensor) {
   const flex::CompositeAddress* addr = get_composite_address(tensor);
   auto flex_alloc = getFlexAllocator();
   const auto& region_map = flex_alloc->getIdToRegionMap();
-  const uint64_t max_segment =
-      flex_alloc->topology().max_tensor_segment_id().value_or(UINT32_MAX);
+  constexpr uint64_t kNumSegments = 8;
 
   std::vector<std::optional<uint32_t>> out;
   out.reserve(addr->chunks().size());
@@ -369,10 +368,11 @@ std::vector<std::optional<uint32_t>> SpyreAllocator::debugChunkSegmentIds(
     const flex::CompositeAddress single(chunk);
     const uint64_t device_address =
         flex::compositeAddressToDeviceAddress(single, region_map);
-    const uint64_t segment =
-        std::get<0>(flex::decodeDevicePointer(device_address));
-    // Segment 0 is never a tensor segment on 1p0.
-    if (segment >= 1 && segment <= max_segment) {
+    const auto [segment, offset, type] =
+        flex::decodeDevicePointer(device_address);
+    // Segment 0 is never a tensor segment on 1p0; segment 7 decodes as Program.
+    if (segment >= 1 && segment < kNumSegments &&
+        type == flex::MemoryType::Tensor) {
       out.emplace_back(static_cast<uint32_t>(segment));
     } else {
       out.emplace_back(std::nullopt);
