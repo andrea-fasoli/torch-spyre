@@ -27,6 +27,10 @@ __all__: list[str] = [
     "stream_get_error_string",
     "synchronize",
     "as_strided_with_layout",
+    "reinterpret_tensor_with_layout",
+    "CompositeChunkInfo",
+    "CompositeAddressHandle",
+    "get_composite_address",
     "empty_with_layout",
     "copy_tensor",
     "fill_tensor",
@@ -38,9 +42,6 @@ __all__: list[str] = [
     "get_elem_in_stick",
     "get_spyre_tensor_layout",
     "get_device_size_in_bytes",
-    "CompositeAddressHandle",
-    "CompositeChunkInfo",
-    "get_composite_address",
     "kernel_provenance_registry_stats",
     "launch_jobplan",
     "lookup_kernel_provenance",
@@ -325,6 +326,55 @@ def as_strided_with_layout(
     arg3: typing.SupportsInt | None,
     arg4: SpyreTensorLayout,
 ) -> torch.Tensor: ...
+def reinterpret_tensor_with_layout(
+    arg0: torch.Tensor,
+    arg1: tuple[int, ...],
+    arg2: tuple[int, ...],
+    arg3: typing.SupportsInt,
+    arg4: SpyreTensorLayout,
+) -> torch.Tensor: ...
+
+class CompositeChunkInfo:
+    """
+    One device chunk of a composite address
+    """
+    @property
+    def region_id(self) -> int: ...
+    @property
+    def offset(self) -> int: ...
+    @property
+    def size(self) -> int: ...
+    @property
+    def domain_id(self) -> int: ...
+
+class CompositeAddressHandle:
+    """
+    Read-only handle over the device address backing a Spyre tensor's storage
+    """
+    @property
+    def total_size(self) -> int:
+        """
+        Total physical (padded/tiled) byte size of the allocation
+        """
+    @property
+    def num_chunks(self) -> int:
+        """
+        Number of device chunks the allocation spans
+        """
+    def chunks(self) -> list[CompositeChunkInfo]:
+        """
+        Per-chunk geometry, in order
+        """
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
+
+def get_composite_address(tensor: torch.Tensor) -> CompositeAddressHandle:
+    """
+    Return a read-only handle over the device address backing a Spyre
+    tensor's storage; the handle keeps that allocation alive
+    """
+    ...
+
 def copy_tensor(
     self: torch.Tensor, dst: torch.Tensor, non_blocking: bool = False
 ) -> None:
@@ -516,25 +566,6 @@ def stream_get_error_string(error: SpyreStreamError) -> str: ...
 def get_device_state() -> SpyreDeviceState: ...
 def start_runtime() -> None: ...
 def to_with_layout(arg0: torch.Tensor, arg1: SpyreTensorLayout) -> torch.Tensor: ...
-
-class CompositeChunkInfo:
-    @property
-    def region_id(self) -> int: ...
-    @property
-    def offset(self) -> int: ...
-    @property
-    def size(self) -> int: ...
-    @property
-    def domain_id(self) -> int: ...
-
-class CompositeAddressHandle:
-    @property
-    def total_size(self) -> int: ...
-    @property
-    def num_chunks(self) -> int: ...
-    def chunks(self) -> list[CompositeChunkInfo]: ...
-
-def get_composite_address(tensor: torch.Tensor) -> CompositeAddressHandle: ...
 
 # Debug hooks for multi-domain (interleaved) placement tests.
 def _spyre_debug_set_emulate_interleave(enabled: bool) -> bool: ...
